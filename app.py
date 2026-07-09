@@ -1,21 +1,54 @@
 import re
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from transformers import pipeline
 from orchestrator import run_agentic_debate
 
-
-
 # Import local processing components
 from scraper import fetch_stock_news
 from aggregator import aggregate_quant_sentiment
 from filter_agent import isolate_target_text  
 
-# 1. Initialize High-Performance Local API Engine
+# 1. Define the Lifespan Handler for VRAM Preservation
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Guarantees the transformer model weights load exactly once into VRAM.
+    Stores the model pipeline in app.state to protect against Uvicorn reload loops.
+    """
+    MODEL_PATH = "./synapse_regression_model/checkpoint-183"  
+    print(f"🧠 Mapping VRAM. Loading weights from {MODEL_PATH} onto Quadro P600 GPU...")
+    
+    try:
+        # Load directly into CUDA device 0 and store it in app.state
+        app.state.sentiment_pipeline = pipeline(
+            "text-classification",
+            model=MODEL_PATH,
+            device=0
+        )
+        print("✅ Model loaded successfully on CUDA pipeline.")
+    except Exception as e:
+        print(f"⚠️ GPU acceleration setup failed. Falling back to CPU. Error: {e}")
+        app.state.sentiment_pipeline = pipeline(
+            "text-classification",
+            model=MODEL_PATH,
+            device=-1  # CPU Fallback
+        )
+    
+    yield  # The app runs while this yields
+    
+    # Clean up model references on shutdown to free VRAM completely
+    if hasattr(app.state, "sentiment_pipeline"):
+        del app.state.sentiment_pipeline
+        print("♻️ VRAM successfully flushed and freed.")
+
+# 2. Initialize High-Performance Local API Engine with Lifespan
 app = FastAPI(
     title="Synapse Local Sentiment Core",
-    description="Local GPU-Accelerated Quant Underwriting Engine Pipeline"
+    description="Local GPU-Accelerated Quant Underwriting Engine Pipeline",
+    lifespan=lifespan
 )
 
 # Enable CORS parameters so local dummy UI layouts or Flutter apps can bridge safely
@@ -26,26 +59,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# 2. Allocate and Load Neural Networks onto Local VRAM
-MODEL_PATH = "./synapse_regression_model/checkpoint-183"  # Replace with your actual relative checkpoint path
-print(f"🧠 Mapping VRAM. Loading weights from {MODEL_PATH} onto Quadro P600 GPU...")
-
-try:
-    # Use standard text-classification pipeline mapped directly to device 0 (CUDA GPU)
-    sentiment_pipeline = pipeline(
-        "text-classification",
-        model=MODEL_PATH,
-        device=0
-    )
-    print("✅ Model loaded successfully on CUDA pipeline.")
-except Exception as e:
-    print(f"⚠️ GPU acceleration setup failed. Falling back to CPU. Error: {e}")
-    sentiment_pipeline = pipeline(
-        "text-classification",
-        model=MODEL_PATH,
-        device=-1 # CPU Fallback configuration
-    )
 
 # 3. Define Structured Input Validator schemas
 class AnalysisPayload(BaseModel):
@@ -62,6 +75,9 @@ def split_text_into_sentences(text: str):
 async def analyze_asset_sentiment(payload: AnalysisPayload):
     ticker_symbol = payload.ticker.upper().strip()
     
+    # Pull the single loaded model out of the app state securely
+    sentiment_pipeline = app.state.sentiment_pipeline
+    
     # Execute Ingestion Layer
     raw_articles = fetch_stock_news(ticker_symbol, max_articles=payload.max_articles)
     
@@ -73,8 +89,7 @@ async def analyze_asset_sentiment(payload: AnalysisPayload):
     # Process batch articles sequentially
     for article in raw_articles:
         try:
-            # --- NEW: CLOUD LLM ISOLATION AGENT ---
-            # Pass the raw RSS text to the agent to strip out noise
+            # --- CLOUD LLM ISOLATION AGENT ---
             cleaned_text = isolate_target_text(article["full_text"], ticker_symbol)
             
             # If the agent determined the article was 100% spam/noise, skip it
@@ -87,7 +102,7 @@ async def analyze_asset_sentiment(payload: AnalysisPayload):
             if not sentences:
                 continue
                 
-            # ... (The rest of your GPU raw_outputs and aggregator math stays EXACTLY the same)
+            # Run calculations off our globally preserved pipeline state
             raw_outputs = sentiment_pipeline(sentences)
             
             # Parse model classification mappings into float structures
@@ -109,7 +124,7 @@ async def analyze_asset_sentiment(payload: AnalysisPayload):
             if not sentence_scores:
                 continue
 
-            # FIX: Find the exact indices using the original unrounded list elements
+            # Find the exact indices using the original unrounded list elements
             raw_min_score = min(sentence_scores)
             raw_max_score = max(sentence_scores)
             max_down_idx = sentence_scores.index(raw_min_score)
@@ -136,8 +151,8 @@ async def analyze_asset_sentiment(payload: AnalysisPayload):
             # Skip any single corrupt article without breaking the entire API call
             print(f"⚠️ Skipping an anomalous article due to error: {item_error}")
             continue
+            
     orchestrator_decision = run_agentic_debate(ticker_symbol, compiled_batch_metrics)
-
         
     return {
         "status": "success",
@@ -146,7 +161,8 @@ async def analyze_asset_sentiment(payload: AnalysisPayload):
         "dataset": compiled_batch_metrics,
         "final_verdict": orchestrator_decision
     }
+
 if __name__ == "__main__":
     import uvicorn
     # Automatically execute local server loop if script run directly
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
