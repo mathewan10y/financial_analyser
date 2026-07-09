@@ -1,0 +1,11 @@
+# Ignore all PyTorch and Hugging Face weights globally
+*.safetensors
+*.pt
+*.pth
+*.bin
+
+# Ignore training checkpoint directories
+checkpoint-*/
+results/
+# Ignore environment variables and secrets
+.env
