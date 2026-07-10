@@ -1,14 +1,33 @@
 import { useState } from 'react';
-import { ChevronDown, Brain } from 'lucide-react';
+import { ChevronDown, Brain, Landmark, TrendingUp, ShieldAlert, Gavel } from 'lucide-react';
 import { parseReasoningSteps } from '../utils/sentiment';
 
 interface ReasoningAccordionProps {
   reasoning: string;
 }
 
+interface AgentPersona {
+  name: string;
+  icon: React.ReactNode;
+  color: string;
+}
+
+const AGENT_PERSONAS: AgentPersona[] = [
+  { name: 'Fundamental Desk', icon: <Landmark className="h-4 w-4" />, color: 'text-blue-400' },
+  { name: 'Technical Desk', icon: <TrendingUp className="h-4 w-4" />, color: 'text-emerald-400' },
+  { name: 'Sentiment Desk', icon: <Brain className="h-4 w-4" />, color: 'text-purple-400' },
+  { name: 'Chief Risk Officer', icon: <ShieldAlert className="h-4 w-4" />, color: 'text-amber-400' },
+  { name: 'Orchestrator', icon: <Gavel className="h-4 w-4" />, color: 'text-red-400' },
+];
+
 export default function ReasoningAccordion({ reasoning }: ReasoningAccordionProps) {
   const [isOpen, setIsOpen] = useState(false);
   const steps = parseReasoningSteps(reasoning);
+
+  // Assign personas to steps cyclically
+  const getPersonaForStep = (index: number) => {
+    return AGENT_PERSONAS[index % AGENT_PERSONAS.length];
+  };
 
   return (
     <div className="rounded-xl border border-slate-700/60 bg-slate-900/40">
@@ -33,14 +52,25 @@ export default function ReasoningAccordion({ reasoning }: ReasoningAccordionProp
         }`}
       >
         <div className="space-y-3 border-t border-slate-700/60 px-4 py-4">
-          {steps.map((step, i) => (
-            <div
-              key={i}
-              className="rounded-lg border border-slate-700/40 bg-slate-800/30 p-3"
-            >
-              <p className="text-xs leading-relaxed text-slate-400">{step}</p>
-            </div>
-          ))}
+          {steps.map((step, i) => {
+            const persona = getPersonaForStep(i);
+            return (
+              <div
+                key={i}
+                className="rounded-lg border border-slate-700/40 bg-slate-800/30 p-3"
+              >
+                <div className="mb-2 flex items-center gap-2">
+                  <div className={`flex h-6 w-6 items-center justify-center rounded-md bg-slate-700/50 ${persona.color}`}>
+                    {persona.icon}
+                  </div>
+                  <span className={`text-xs font-semibold ${persona.color}`}>
+                    {persona.name}
+                  </span>
+                </div>
+                <p className="text-xs leading-relaxed text-slate-400 pl-8">{step}</p>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
