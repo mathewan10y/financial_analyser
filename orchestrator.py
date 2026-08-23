@@ -1,39 +1,95 @@
 import os
 import time
+import random
+import asyncio
 import json
 import yfinance as yf
-import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
 from dotenv import load_dotenv
 
-# Load API key and configure Gemini
+# Load API key and configure Gemini via official google.genai SDK
 load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY:
     raise ValueError("🚨 GEMINI_API_KEY missing from .env file!")
 
-genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
+client = genai.Client(api_key=API_KEY)
+MODEL_NAME = "gemini-2.5-flash"
 
-def call_gemini_safe(prompt: str, is_json: bool = False, max_retries: int = 3) -> str:
-    """A bulletproof wrapper that catches rate limits and automatically retries."""
+# Global concurrency control to prevent sudden API bursts
+RATE_LIMIT_SEMAPHORE = asyncio.Semaphore(2)
+
+def call_gemini_safe(prompt: str, is_json: bool = False, max_retries: int = 4) -> str:
+    """Synchronous bulletproof wrapper that catches rate limits with exponential backoff and automatically retries."""
+    config = types.GenerateContentConfig(response_mime_type="application/json") if is_json else None
     for attempt in range(max_retries):
         try:
-            if is_json:
-                return model.generate_content(
-                    prompt,
-                    generation_config=genai.GenerationConfig(response_mime_type="application/json")
-                ).text
+            response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt,
+                config=config
+            )
+            return response.text
+        except APIError as e:
+            if getattr(e, 'code', None) == 429 or "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                sleep_duration = 12 + (2 ** attempt) + random.uniform(1.0, 4.0)
+                print(f"⏳ [API Rate Limit 429] Pausing for {sleep_duration:.2f}s (Retry {attempt + 1}/{max_retries})...")
+                time.sleep(sleep_duration)
             else:
-                return model.generate_content(prompt).text
-        except ResourceExhausted:
-            print(f"⏳ [API Rate Limit Hit] Pausing for 15 seconds (Retry {attempt + 1}/{max_retries})...")
-            time.sleep(15)  # Wait for the Google quota to reset
+                print(f"❌ [API Error] {e}")
+                if attempt == max_retries - 1:
+                    return "Data unavailable due to system error."
+                time.sleep(5)
         except Exception as e:
-            print(f"❌ [API Error] {e}")
-            if attempt == max_retries - 1:
-                return "Data unavailable due to system error."
-            time.sleep(5)
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                sleep_duration = 12 + (2 ** attempt) + random.uniform(1.0, 4.0)
+                print(f"⏳ [API Rate Limit Hit] Pausing for {sleep_duration:.2f}s (Retry {attempt + 1}/{max_retries})...")
+                time.sleep(sleep_duration)
+            else:
+                print(f"❌ [API Error] {e}")
+                if attempt == max_retries - 1:
+                    return "Data unavailable due to system error."
+                time.sleep(5)
+            
+    return "Data unavailable due to persistent rate limiting."
+
+async def call_gemini_safe_async(prompt: str, is_json: bool = False, max_retries: int = 4, delay_offset: float = 0.0) -> str:
+    """Asynchronous wrapper with staggered jitter, concurrency semaphore control, and randomized exponential backoff."""
+    if delay_offset > 0:
+        await asyncio.sleep(delay_offset)
+
+    config = types.GenerateContentConfig(response_mime_type="application/json") if is_json else None
+    for attempt in range(max_retries):
+        try:
+            async with RATE_LIMIT_SEMAPHORE:
+                response = await client.aio.models.generate_content(
+                    model=MODEL_NAME,
+                    contents=prompt,
+                    config=config
+                )
+                return response.text
+        except APIError as e:
+            if getattr(e, 'code', None) == 429 or "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                sleep_duration = 12 + (2 ** attempt) + random.uniform(1.0, 4.0)
+                print(f"⏳ [API Rate Limit 429] Pausing for {sleep_duration:.2f}s (Retry {attempt + 1}/{max_retries})...")
+                await asyncio.sleep(sleep_duration)
+            else:
+                print(f"❌ [API Error] {e}")
+                if attempt == max_retries - 1:
+                    return "Data unavailable due to system error."
+                await asyncio.sleep(5)
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                sleep_duration = 12 + (2 ** attempt) + random.uniform(1.0, 4.0)
+                print(f"⏳ [API Rate Limit Hit] Pausing for {sleep_duration:.2f}s (Retry {attempt + 1}/{max_retries})...")
+                await asyncio.sleep(sleep_duration)
+            else:
+                print(f"❌ [API Error] {e}")
+                if attempt == max_retries - 1:
+                    return "Data unavailable due to system error."
+                await asyncio.sleep(5)
             
     return "Data unavailable due to persistent rate limiting."
 

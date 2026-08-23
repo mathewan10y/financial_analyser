@@ -26,7 +26,7 @@ export default function SearchBar({ activeTicker, onTickerSelect }: SearchBarPro
   const [results, setResults] = useState<TickerResult[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
-  const debounceRef = useRef<NodeJS.Timeout | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const searchTickers = useCallback(async (searchQuery: string) => {
     if (searchQuery.length < 1) {
@@ -102,7 +102,7 @@ export default function SearchBar({ activeTicker, onTickerSelect }: SearchBarPro
   }
 
   return (
-    <div ref={containerRef} className="relative w-full max-w-2xl z-[9999]">
+    <div ref={containerRef} className="relative z-50 w-full max-w-2xl">
       <div className="relative flex items-center">
         <Search className="absolute left-4 h-5 w-5 text-slate-500" />
         <input
@@ -132,7 +132,7 @@ export default function SearchBar({ activeTicker, onTickerSelect }: SearchBarPro
       </div>
 
       {isOpen && (results.length > 0 || isLoading) && (
-        <ul className="absolute left-0 right-0 mt-1 z-50 overflow-visible shadow-2xl rounded-xl border border-slate-700/80 bg-slate-900/95 backdrop-blur-md">
+        <ul className="absolute top-full left-0 right-0 mt-2 z-[100] bg-slate-800 border border-slate-700 shadow-2xl overflow-hidden rounded-md">
           {isLoading && results.length === 0 ? (
             <li className="flex items-center justify-center px-4 py-8">
               <Loader2 className="mr-2 h-4 w-4 animate-spin text-emerald-500" />

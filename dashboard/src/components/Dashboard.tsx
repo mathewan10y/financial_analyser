@@ -8,28 +8,31 @@ import {
   FileText,
 } from 'lucide-react';
 import SearchBar from './SearchBar';
-import PipelineProgress from './PipelineProgress';
 import PipelineVisualization from './PipelineVisualization';
 import VerdictBoard from './VerdictBoard';
 import MultiPersonaPipeline from './MultiPersonaPipeline';
-import { runPipelineWithProgress } from '../api/analyze';
+import { runPipelineWithProgress, type StreamUpdate } from '../api/analyze';
 import type { AnalysisResponse } from '../types';
 
 export default function Dashboard() {
   const [data, setData] = useState<AnalysisResponse | null>(null);
   const [selectedTicker, setSelectedTicker] = useState('');
   const [isRunning, setIsRunning] = useState(false);
-  const [currentStep, setCurrentStep] = useState(0);
+  const [currentPhase, setCurrentPhase] = useState<StreamUpdate['phase'] | null>(null);
+  const [activeAgent, setActiveAgent] = useState<StreamUpdate['agent'] | null>(null);
+  const [agentOutputs, setAgentOutputs] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [hasRunOnce, setHasRunOnce] = useState(false);
-  const [isFetching, setIsFetching] = useState(false); // Separate fetch state from animation
+  const [isFetching, setIsFetching] = useState(false);
 
   const handleRunPipeline = useCallback(async () => {
     if (!selectedTicker || isRunning) return;
 
     setIsRunning(true);
     setIsFetching(true);
-    setCurrentStep(0);
+    setCurrentPhase(null);
+    setActiveAgent(null);
+    setAgentOutputs({});
     setError(null);
     setHasRunOnce(true);
     setData(null); // Clear previous data
@@ -37,10 +40,31 @@ export default function Dashboard() {
     try {
       const result = await runPipelineWithProgress(
         selectedTicker,
-        (stepIndex) => setCurrentStep(stepIndex + 1),
+        (update: StreamUpdate) => {
+          setCurrentPhase(update.phase);
+          setActiveAgent(update.agent ?? null);
+
+          if (update.phase === 'agent_result' && update.agent && update.text) {
+            setAgentOutputs((prev) => ({
+              ...prev,
+              [update.agent!]: update.text!,
+            }));
+          }
+          
+          // Stop showing skeleton when we get to filtering phase (articles are being processed)
+          if (update.phase === 'filtering') {
+            setIsFetching(false);
+          }
+          
+          if (update.phase === 'error') {
+            setError(update.message || 'Pipeline error occurred');
+            setIsRunning(false);
+            setIsFetching(false);
+          }
+        },
       );
       setData(result);
-      setIsFetching(false); // Data arrived, stop showing skeleton
+      setIsFetching(false);
     } catch (err) {
       setError(
         err instanceof Error
@@ -50,6 +74,8 @@ export default function Dashboard() {
       setIsFetching(false);
     } finally {
       setIsRunning(false);
+      setCurrentPhase(null);
+      setActiveAgent(null);
     }
   }, [selectedTicker, isRunning]);
 
@@ -107,7 +133,6 @@ export default function Dashboard() {
                   )}
                 </button>
               )}
-              <PipelineProgress currentStep={currentStep} isRunning={isRunning} />
               {error && (
                 <div className="mt-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-950/30 px-4 py-3 text-sm text-red-400">
                   <AlertCircle className="h-4 w-4 shrink-0" />
@@ -163,6 +188,9 @@ export default function Dashboard() {
                 // State B: Loading - MultiPersonaPipeline confined to panel
                 <MultiPersonaPipeline 
                   isRunning={isRunning} 
+                  currentPhase={currentPhase}
+                  activeAgent={activeAgent}
+                  agentOutputs={agentOutputs}
                 />
               ) : data ? (
                 // State C: Success - VerdictBoard

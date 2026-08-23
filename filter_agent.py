@@ -1,63 +1,95 @@
-import os
-import google.generativeai as genai
-from dotenv import load_dotenv
+import re
+import yfinance as yf
 
-# 1. Load environment variables from the local .env file
-load_dotenv()
+# Common ticker to company name aliases cache
+TICKER_ALIASES = {
+    "AAPL": ["Apple", "iPhone", "Mac", "iPad"],
+    "MSFT": ["Microsoft", "Azure", "Windows", "Office"],
+    "NVDA": ["Nvidia", "NVIDIA", "GeForce", "Jensen Huang"],
+    "TSLA": ["Tesla", "Elon Musk", "Cybertruck"],
+    "GOOGL": ["Google", "Alphabet", "Waymo", "Android"],
+    "GOOG": ["Google", "Alphabet", "Waymo", "Android"],
+    "AMZN": ["Amazon", "AWS", "Prime"],
+    "META": ["Meta", "Facebook", "Instagram", "WhatsApp", "Zuckerberg"],
+    "AMD": ["AMD", "Advanced Micro Devices", "Radeon", "Ryzen"],
+    "INTC": ["Intel", "Pat Gelsinger"],
+    "NFLX": ["Netflix"],
+    "JPM": ["JPMorgan", "JP Morgan", "Chase", "Jamie Dimon"],
+    "BAC": ["Bank of America", "BofA"],
+    "V": ["Visa"],
+    "MA": ["Mastercard"],
+    "DIS": ["Disney", "Disney+", "ESPN"],
+    "WMT": ["Walmart"],
+    "COIN": ["Coinbase"],
+    "PLTR": ["Palantir", "Alex Karp"],
+    "SPY": ["S&P 500", "S&P", "SPDR"],
+    "QQQ": ["Nasdaq", "Invesco QQQ"],
+    "IWM": ["Russell 2000", "Russell"]
+}
 
-# 2. Extract the API key securely
-API_KEY = os.getenv("GEMINI_API_KEY")
+_COMPANY_NAME_CACHE = {}
 
-if not API_KEY:
-    raise ValueError(
-        "🚨 SYSTEM ERROR: GEMINI_API_KEY missing from environment. "
-        "Please check that your .env file exists and contains: GEMINI_API_KEY=your_key"
-    )
+def get_company_keywords(ticker: str) -> list[str]:
+    """Retrieves aliases and company names for a given ticker."""
+    clean_ticker = ticker.upper().strip()
+    if clean_ticker in _COMPANY_NAME_CACHE:
+        return _COMPANY_NAME_CACHE[clean_ticker]
+    
+    keywords = [clean_ticker]
+    if clean_ticker in TICKER_ALIASES:
+        keywords.extend(TICKER_ALIASES[clean_ticker])
+    else:
+        # Fallback dynamic lookup via yfinance
+        try:
+            info = yf.Ticker(clean_ticker).info
+            short_name = info.get("shortName")
+            long_name = info.get("longName")
+            if short_name:
+                cleaned = re.sub(r'\b(Inc\.?|Corp\.?|Corporation|Ltd\.?|plc|LLC|Group|Holdings|Co\.?)\b', '', short_name, flags=re.IGNORECASE).strip()
+                if cleaned and len(cleaned) > 2:
+                    keywords.append(cleaned)
+            if long_name:
+                cleaned = re.sub(r'\b(Inc\.?|Corp\.?|Corporation|Ltd\.?|plc|LLC|Group|Holdings|Co\.?)\b', '', long_name, flags=re.IGNORECASE).strip()
+                if cleaned and len(cleaned) > 2 and cleaned not in keywords:
+                    keywords.append(cleaned)
+        except Exception:
+            pass
 
-# 3. Initialize and configure the Gemini client
-genai.configure(api_key=API_KEY)
+    _COMPANY_NAME_CACHE[clean_ticker] = keywords
+    return keywords
 
-
-model = genai.GenerativeModel('gemini-2.5-flash')
 def isolate_target_text(raw_text: str, target_ticker: str) -> str:
     """
-    Acts as the Synapse Text Isolation Agent.
-    Parses noisy financial feeds to strip out competitor updates, macro clutter, 
-    and returns only sentences directly relevant to the target asset.
+    Deterministic Synapse Text Isolation Agent.
+    Parses financial text and extracts only sentences/paragraphs that directly mention
+    the target ticker or company name, preserving LLM quota.
     """
-    print(f"🧠 [Cloud Agent] Filtering text noise for target: {target_ticker}...")
+    if not raw_text or not target_ticker:
+        return ""
+
+    keywords = get_company_keywords(target_ticker)
     
-    prompt = f"""
-    You are the Synapse Text Isolation Agent. 
-    Target Company Ticker: {target_ticker}
+    # Compile regex patterns matching keywords with word boundaries
+    patterns = []
+    for kw in keywords:
+        escaped = re.escape(kw)
+        patterns.append(rf'\${escaped}\b')
+        patterns.append(rf'\b{escaped}\b')
     
-    Task: Read the following financial news text. Extract and return ONLY the 
-    sentences and data points that directly pertain to {target_ticker} or its 
-    direct market environment. 
+    combined_regex = re.compile("|".join(patterns), re.IGNORECASE)
     
-    Strict Rules:
-    1. If a sentence is entirely about a competitor and does not impact the target, remove it.
-    2. If the text does not contain any relevant information about the target, return an empty string.
-    3. Do not add any conversational meta-commentary, introductory remarks, or filler. 
-    Return ONLY the raw isolated paragraphs or sentences.
+    # Partition raw text into sentences
+    sentences = re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|\!)\s+', raw_text)
     
-    Raw Text:
-    {raw_text}
-    """
-    
-    try:
-        response = model.generate_content(prompt)
-        cleaned_text = response.text.strip()
-        
-        # If the LLM filtered out all text as noise/spam
-        if not cleaned_text:
-            print(f"⚠️ [Cloud Agent] Content filtered out completely. No direct relevance to {target_ticker}.")
-            return ""
+    relevant_sentences = []
+    for sentence in sentences:
+        s_clean = sentence.strip()
+        if not s_clean:
+            continue
+        if combined_regex.search(s_clean):
+            relevant_sentences.append(s_clean)
             
-        return cleaned_text
+    if not relevant_sentences:
+        return ""
         
-    except Exception as e:
-        print(f"❌ [Cloud Agent] API execution failed: {e}. Executing core local fallback protocol.")
-        # Fault Tolerance: Return the raw uncleaned text if internet drops or rate limits hit.
-        # This keeps the local GPU pipeline alive and prevents app crashes.
-        return raw_text
+    return " ".join(relevant_sentences)

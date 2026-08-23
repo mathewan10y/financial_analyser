@@ -2,6 +2,20 @@ import type { AnalysisResponse } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_URL ?? '';
 
+export interface StreamUpdate {
+  phase: string;
+  message?: string;
+  agent?: string;
+  text?: string;
+  article_index?: number;
+  sentence_index?: number;
+  sentence?: string;
+  score?: number;
+  total_sentences?: number;
+  payload?: AnalysisResponse;
+  [key: string]: any;
+}
+
 function sanitizeJsonString(jsonString: string): string {
   let sanitized = jsonString;
   
@@ -28,20 +42,10 @@ function sanitizeJsonString(jsonString: string): string {
   return sanitized;
 }
 
-function safeJsonParse<T>(jsonString: string, fallback: T): T {
-  try {
-    const sanitized = sanitizeJsonString(jsonString);
-    return JSON.parse(sanitized) as T;
-  } catch (error) {
-    console.error('JSON parse error, using fallback:', error);
-    console.error('Failed to parse:', jsonString.substring(0, 200));
-    return fallback;
-  }
-}
-
 export async function analyzeTicker(
   ticker: string,
   maxArticles = 3,
+  onUpdate: (update: StreamUpdate) => void,
 ): Promise<AnalysisResponse> {
   const response = await fetch(`${API_BASE}/api/v1/analyze`, {
     method: 'POST',
@@ -57,76 +61,91 @@ export async function analyzeTicker(
     );
   }
 
-  const rawText = await response.text();
-  console.log('Raw response length:', rawText.length);
+  const reader = response.body?.getReader();
+  const decoder = new TextDecoder();
   
-  try {
-    // Try to parse the full response first
-    const parsed = safeJsonParse<AnalysisResponse>(rawText, null as any);
-    if (parsed && parsed.final_verdict) {
-      console.log('Successfully parsed full response');
-      return parsed;
-    }
-  } catch (error) {
-    console.error('Full JSON parse failed, attempting partial sanitization:', error);
+  if (!reader) {
+    throw new Error('Response body is not readable');
   }
-  
-  // If full parse fails, try to extract and sanitize the final_verdict field
+
+  let finalPayload: AnalysisResponse | null = null;
+  let buffer = '';
+
   try {
-    const fallbackResponse: AnalysisResponse = {
-      status: 'error',
-      ticker,
-      dataset: [],
-      payload_length: 0,
-      final_verdict: {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      // Keep the incomplete chunk in buffer
+      buffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const update: StreamUpdate = JSON.parse(trimmed);
+          onUpdate(update);
+
+          if (update.phase === 'complete' && update.payload) {
+            const sanitizedPayload = sanitizePayload(update.payload);
+            finalPayload = sanitizedPayload;
+          }
+        } catch (parseError) {
+          console.error('Failed to parse stream line:', trimmed, parseError);
+        }
+      }
+    }
+
+    // Process any remaining tail in buffer
+    if (buffer.trim()) {
+      try {
+        const update: StreamUpdate = JSON.parse(buffer.trim());
+        onUpdate(update);
+        if (update.phase === 'complete' && update.payload) {
+          const sanitizedPayload = sanitizePayload(update.payload);
+          finalPayload = sanitizedPayload;
+        }
+      } catch (parseError) {
+        console.error('Failed to parse remaining stream buffer:', buffer, parseError);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (!finalPayload) {
+    throw new Error('Stream completed without final payload');
+  }
+
+  return finalPayload;
+}
+
+function sanitizePayload(payload: AnalysisResponse): AnalysisResponse {
+  // Sanitize the final_verdict if it exists
+  if (payload.final_verdict) {
+    try {
+      const verdictString = JSON.stringify(payload.final_verdict);
+      const sanitized = sanitizeJsonString(verdictString);
+      payload.final_verdict = JSON.parse(sanitized);
+    } catch (error) {
+      console.error('Failed to sanitize final_verdict, using fallback:', error);
+      payload.final_verdict = {
         decision: 'HOLD',
         confidence_score: 0,
         executive_summary: 'Unable to parse verdict response due to formatting errors.',
         internal_reasoning_process: '',
-      },
-    };
-    
-    // Try to extract the final_verdict object with better regex for nested objects
-    const verdictMatch = rawText.match(/"final_verdict"\s*:\s*(\{[^}]*\{[^}]*\}[^}]*\}|\{[^}]*\})/s);
-    if (verdictMatch) {
-      console.log('Found verdict match, attempting to parse');
-      const verdictJson = safeJsonParse(verdictMatch[1], fallbackResponse.final_verdict);
-      if (verdictJson.decision && verdictJson.confidence_score !== undefined) {
-        fallbackResponse.final_verdict = verdictJson;
-        console.log('Successfully parsed verdict:', verdictJson.decision, verdictJson.confidence_score);
-      }
+      };
     }
-    
-    return fallbackResponse;
-  } catch (error) {
-    console.error('All parsing attempts failed:', error);
-    throw new Error('Failed to parse API response');
   }
+  return payload;
 }
 
 export async function runPipelineWithProgress(
   ticker: string,
-  onStepComplete: (stepIndex: number) => void,
+  onUpdate: (update: StreamUpdate) => void,
   maxArticles = 3,
 ): Promise<AnalysisResponse> {
-  const stepDurations = [1200, 1800, 2400, 1000];
-
-  // Start the API call immediately
-  const apiPromise = analyzeTicker(ticker, maxArticles);
-
-  // Run progress animation independently
-  const progressPromise = (async () => {
-    for (let i = 0; i < stepDurations.length; i++) {
-      await new Promise((r) => setTimeout(r, stepDurations[i]));
-      onStepComplete(i);
-    }
-  })();
-
-  // Return API result immediately when ready, don't wait for animation
-  const result = await apiPromise;
-  
-  // Let progress animation continue in background
-  progressPromise.catch(console.error);
-
-  return result;
+  return analyzeTicker(ticker, maxArticles, onUpdate);
 }
