@@ -24,7 +24,14 @@ TICKER_ALIASES = {
     "PLTR": ["Palantir", "Alex Karp"],
     "SPY": ["S&P 500", "S&P", "SPDR"],
     "QQQ": ["Nasdaq", "Invesco QQQ"],
-    "IWM": ["Russell 2000", "Russell"]
+    "IWM": ["Russell 2000", "Russell"],
+    "TCS": ["TCS", "Tata Consultancy", "Tata Consultancy Services", "Tata"],
+    "INFY": ["Infosys", "Narayan Murthy", "Salil Parekh"],
+    "RELIANCE": ["Reliance", "Mukesh Ambani", "Jio", "RIL"],
+    "HDFCBANK": ["HDFC", "HDFC Bank"],
+    "ICICIBANK": ["ICICI", "ICICI Bank"],
+    "SBIN": ["SBI", "State Bank of India"],
+    "WIPRO": ["Wipro"],
 }
 
 _COMPANY_NAME_CACHE = {}
@@ -35,28 +42,41 @@ def get_company_keywords(ticker: str) -> list[str]:
     if clean_ticker in _COMPANY_NAME_CACHE:
         return _COMPANY_NAME_CACHE[clean_ticker]
     
-    keywords = [clean_ticker]
-    if clean_ticker in TICKER_ALIASES:
-        keywords.extend(TICKER_ALIASES[clean_ticker])
-    else:
-        # Fallback dynamic lookup via yfinance
-        try:
-            info = yf.Ticker(clean_ticker).info
-            short_name = info.get("shortName")
-            long_name = info.get("longName")
-            if short_name:
-                cleaned = re.sub(r'\b(Inc\.?|Corp\.?|Corporation|Ltd\.?|plc|LLC|Group|Holdings|Co\.?)\b', '', short_name, flags=re.IGNORECASE).strip()
-                if cleaned and len(cleaned) > 2:
-                    keywords.append(cleaned)
-            if long_name:
-                cleaned = re.sub(r'\b(Inc\.?|Corp\.?|Corporation|Ltd\.?|plc|LLC|Group|Holdings|Co\.?)\b', '', long_name, flags=re.IGNORECASE).strip()
-                if cleaned and len(cleaned) > 2 and cleaned not in keywords:
-                    keywords.append(cleaned)
-        except Exception:
-            pass
+    base_symbol = re.sub(r'[\^=].*$', '', clean_ticker)
+    base_symbol = re.sub(r'\.[A-Z]{2,3}$', '', base_symbol).strip()
 
-    _COMPANY_NAME_CACHE[clean_ticker] = keywords
-    return keywords
+    keywords = set()
+    keywords.add(clean_ticker)
+    if base_symbol:
+        keywords.add(base_symbol)
+        
+    for sym in [clean_ticker, base_symbol]:
+        if sym in TICKER_ALIASES:
+            keywords.update(TICKER_ALIASES[sym])
+
+    # Dynamic lookup via yfinance
+    try:
+        info = yf.Ticker(clean_ticker).info or {}
+        short_name = info.get("shortName", "")
+        long_name = info.get("longName", "")
+        
+        for name in [short_name, long_name]:
+            if name:
+                keywords.add(name.strip())
+                # Strip legal entity suffixes
+                cleaned = re.sub(r'(?i)\b(inc|ltd|corp|corporation|limited|plc|llc|group|holdings|co|company|serv|services|lt)\b\.?', '', name).strip()
+                if cleaned and len(cleaned) > 2:
+                    keywords.add(cleaned)
+                    # Add primary word tokens if distinctive (length > 3)
+                    words = [w.strip() for w in re.split(r'[\s,\-]+', cleaned) if len(w.strip()) > 3]
+                    for w in words:
+                        keywords.add(w)
+    except Exception:
+        pass
+
+    result = [k for k in keywords if len(k) >= 2]
+    _COMPANY_NAME_CACHE[clean_ticker] = result
+    return result
 
 def isolate_target_text(raw_text: str, target_ticker: str) -> str:
     """
@@ -76,7 +96,7 @@ def isolate_target_text(raw_text: str, target_ticker: str) -> str:
         patterns.append(rf'\${escaped}\b')
         patterns.append(rf'\b{escaped}\b')
     
-    combined_regex = re.compile("|".join(patterns), re.IGNORECASE)
+    combined_regex = re.compile("|".join(patterns), re.IGNORECASE) if patterns else None
     
     # Partition raw text into sentences
     sentences = re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|\!)\s+', raw_text)
@@ -86,10 +106,13 @@ def isolate_target_text(raw_text: str, target_ticker: str) -> str:
         s_clean = sentence.strip()
         if not s_clean:
             continue
-        if combined_regex.search(s_clean):
+        if combined_regex and combined_regex.search(s_clean):
             relevant_sentences.append(s_clean)
             
     if not relevant_sentences:
+        # Fallback: if raw_text is short (such as a targeted RSS headline/snippet), preserve it
+        if len(raw_text.strip()) <= 300:
+            return raw_text.strip()
         return ""
         
     return " ".join(relevant_sentences)
