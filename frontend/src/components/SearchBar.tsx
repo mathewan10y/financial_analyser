@@ -65,8 +65,8 @@ export default function SearchBar({ activeTicker, onTickerSelect }: SearchBarPro
 
     setIsLoading(true);
     try {
-      // Query local backend proxy endpoint
-      const response = await fetch(`/api/v1/search?q=${encodeURIComponent(q)}`);
+      const apiBase = import.meta.env.VITE_API_URL ?? '';
+      const response = await fetch(`${apiBase}/api/v1/search?q=${encodeURIComponent(q)}`);
       if (response.ok) {
         const data = await response.json();
         const quotes = (data.quotes || []).map((quote: any) => ({
