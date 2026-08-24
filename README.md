@@ -3,7 +3,7 @@
 An AI-driven, orchestrated pipeline for scraping, filtering, and analyzing financial sentiment in real-time. 
 
 ## 🏗 Architecture & Workflow
-![Architecture Diagram](image.png)
+![Architecture Diagram](assets/screenshots/workflow.png)
 
 ## 💻 Tech Stack
 * **Backend & AI:** Python, Fine-tuned Financial LLM (HuggingFace)
@@ -16,8 +16,19 @@ An AI-driven, orchestrated pipeline for scraping, filtering, and analyzing finan
 * **Custom Financial LLM:** Utilizes a locally fine-tuned tokenizer and model for highly accurate financial sentiment scoring. 
 * **Real-Time Visualization:** Interactive React dashboard featuring confidence rings, reasoning accordions, and verdict boards. 
 
-*(Optional: Insert a screenshot of your dashboard here)*
-<!-- ![Dashboard Preview](dashboard_screenshot.png) -->
+## 📊 Dashboard Preview
+<div align="center">
+  <table border="0">
+    <tr>
+      <td><img src="assets/screenshots/scraping.png" alt="Live Data Scraping" width="100%"></td>
+      <td><img src="assets/screenshots/articles.png" alt="Ingested Articles Panel" width="100%"></td>
+    </tr>
+    <tr>
+      <td><img src="assets/screenshots/verdict.png" alt="Quantitative Verdict Panel" width="100%"></td>
+      <td><img src="assets/screenshots/cro.png" alt="Conflict Resolution Breakdown" width="100%"></td>
+    </tr>
+  </table>
+</div>
 
 ## 📋 Prerequisites
 Make sure you have the following installed:
@@ -30,14 +41,15 @@ Make sure you have the following installed:
 ### 1. Backend Setup
 Navigate to the backend directory, install dependencies, and start the orchestrator:
 ```bash
-pip install -r fin_sentience_model/requirements.txt
-# Add your environment variables (e.g., API keys) to a .env file here
-python fin_sentience_model/orchestrator.py
-```
+cd backend
+..\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python app.py
+
 
 ### 2. Frontend Setup
 ```bash
-cd fin_sentience_model/dashboard
+cd frontend
 npm install
 npm run dev
 ```
