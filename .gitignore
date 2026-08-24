@@ -1,8 +1,9 @@
 # ========================
 # 1. AI Model Weights & Checkpoints
 # ========================
-synapse_regression_model/
-results/
+models/synapse_regression_model/
+models/fine_tuned_financial_model/
+models/results/
 *.safetensors
 *.bin
 *.h5
@@ -19,12 +20,12 @@ __pycache__/
 .pytest_cache/
 
 # ========================
-# 3. React Frontend (Dashboard)
+# 3. React Frontend
 # ========================
-dashboard/node_modules/
-dashboard/dist/
-dashboard/build/
-dashboard/.eslintcache
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.eslintcache
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
