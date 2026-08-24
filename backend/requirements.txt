@@ -1,11 +1,9 @@
-torch
-transformers
+fastapi
+uvicorn[standard]
+huggingface_hub
 requests
 feedparser
-beautifulsoup4
 yfinance
 groq
-fastapi
-uvicorn
-python-dotenv
 google-genai
+python-dotenv

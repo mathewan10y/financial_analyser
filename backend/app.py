@@ -10,84 +10,127 @@ import os
 import re
 import json
 import asyncio
-import torch
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
-from orchestrator import (
-    get_financial_metrics,
-    call_llm_with_fallback,
-    call_llm_with_fallback_async,
-    call_gemini_safe,
-    call_gemini_safe_async,
-    generate_emergency_local_verdict,
+from dotenv import load_dotenv
+
+load_dotenv()
+
+app = FastAPI(
+    title="Synapse Quantitative Intelligence API",
+    description="Multi-agent financial sentiment analysis and market intelligence engine."
 )
 
-# Dynamic Model Configuration
+# ---------------------------------------------------------
+# CORS CONFIGURATION (Permits AWS Amplify & Localhost)
+# ---------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------------
+# HYBRID MODEL INFERENCE ADAPTER
+# ---------------------------------------------------------
 MODEL_ID = os.getenv("HF_MODEL_ID", "mathewan10y/synapse-financial-sentiment")
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+USE_SERVERLESS = os.getenv("USE_SERVERLESS", "false").lower() in ("true", "1", "yes")
+
+_local_model = None
+_local_tokenizer = None
+_hf_client = None
+_device = "cpu"
+
+if USE_SERVERLESS:
+    print(f"☁️ [Mode] Cloud Serverless Inference active: {MODEL_ID}")
+    from huggingface_hub import InferenceClient
+    hf_token = os.getenv("HF_TOKEN")
+    _hf_client = InferenceClient(token=hf_token)
+else:
+    print(f"💻 [Mode] Local Model Execution requested: {MODEL_ID}")
+    try:
+        import torch
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        
+        _device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"⚙️ [Hardware] Target compute device: {_device}")
+        
+        _local_tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+        _local_model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID)
+        _local_model.to(_device)
+        _local_model.eval()
+        print("✅ [Model Loader] Local model loaded successfully.")
+    except Exception as e:
+        print(f"⚠️ [Model Loader] Local PyTorch load failed: {e}")
+        print("🔄 [Model Loader] Falling back to Hugging Face Serverless API...")
+        from huggingface_hub import InferenceClient
+        USE_SERVERLESS = True
+        _hf_client = InferenceClient(token=os.getenv("HF_TOKEN"))
+
+
+def analyze_headline_sentiment(text: str) -> dict:
+    """
+    Evaluates text polarity. Supports both local transformer evaluation 
+    and Hugging Face Serverless Inference API.
+    Returns: dict mapping sentiment labels to normalized probability scores.
+    """
+    if not text or not text.strip():
+        return {"neutral": 1.0, "positive": 0.0, "negative": 0.0}
+
+    # 1. Cloud Serverless Route
+    if USE_SERVERLESS and _hf_client is not None:
+        try:
+            results = _hf_client.text_classification(text=text, model=MODEL_ID)
+            score_map = {res.label.lower(): float(res.score) for res in results}
+            return score_map
+        except Exception as e:
+            print(f"⚠️ [Serverless API Warning] {e}. Providing baseline fallback.")
+            return {"neutral": 0.5, "positive": 0.25, "negative": 0.25}
+
+    # 2. Local PyTorch Route
+    if _local_model is not None and _local_tokenizer is not None:
+        try:
+            import torch
+            inputs = _local_tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+            inputs = {k: v.to(_device) for k, v in inputs.items()}
+            with torch.no_grad():
+                logits = _local_model(**inputs).logits
+                probs = torch.softmax(logits, dim=-1)[0].tolist()
+            
+            id2label = getattr(_local_model.config, "id2label", {0: "negative", 1: "neutral", 2: "positive"})
+            return {id2label.get(i, f"label_{i}").lower(): p for i, p in enumerate(probs)}
+        except Exception as e:
+            print(f"⚠️ [Local Inference Error] {e}")
+            return {"neutral": 0.5, "positive": 0.25, "negative": 0.25}
+
+    return {"neutral": 1.0, "positive": 0.0, "negative": 0.0}
+
+
+# ---------------------------------------------------------
+# SYSTEM HEALTH & COLD START WAKE-UP
+# ---------------------------------------------------------
+@app.get("/health")
+async def health_check():
+    """Endpoint for frontend cold-start probing and uptime monitoring."""
+    return {
+        "status": "healthy",
+        "service": "synapse-backend",
+        "mode": "serverless" if USE_SERVERLESS else "local"
+    }
+
 
 # Import local processing components
 from scraper import fetch_stock_news, generate_baseline_telemetry_placeholder
 from aggregator import aggregate_quant_sentiment
 from filter_agent import isolate_target_text  
-
-# 1. Define the Lifespan Handler for Dynamic Hugging Face Hub Model Loading
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Guarantees transformer model weights load dynamically from Hugging Face Hub into compute memory.
-    Stores the model and tokenizer in app.state to protect against Uvicorn reload loops.
-    """
-    print(f"📦 [Model Loader] Loading sentiment weights from Hugging Face Hub: {MODEL_ID}...")
-    print(f"⚙️ [Hardware] Target compute device: {DEVICE}")
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-        model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID)
-        model.to(DEVICE)
-        model.eval()
-        app.state.tokenizer = tokenizer
-        app.state.model = model
-        app.state.device = DEVICE
-        print("✅ [Model Loader] Hugging Face model and tokenizer initialized successfully.")
-    except Exception as e:
-        print(f"⚠️ [Model Loader] Error loading {MODEL_ID}: {e}")
-        print("🔄 [Model Loader] Falling back to default baseline / CPU pipeline...")
-        try:
-            tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
-            model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
-            model.to("cpu")
-            model.eval()
-            app.state.tokenizer = tokenizer
-            app.state.model = model
-            app.state.device = "cpu"
-            print("✅ [Model Loader] Fallback CPU model loaded.")
-        except Exception as fallback_e:
-            print(f"❌ [Model Loader] Critical error initializing sentiment model: {fallback_e}")
-            app.state.tokenizer = None
-            app.state.model = None
-            app.state.device = "cpu"
-    yield
-    # Cleanup on server shutdown if necessary
-    print("🛑 [Model Loader] Unloading sentiment pipeline.")
-
-# 2. Instantiate the FastAPI App with state lifespan
-app = FastAPI(
-    title="Synapse - Local Sentiment Edge + Dual Cloud Agent Pipeline",
-    version="2.0.0",
-    lifespan=lifespan
-)
-
-# 3. Add CORS Middleware to enable communication with Vite frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Adjust for specific origin in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+from orchestrator import (
+    get_financial_metrics,
+    call_llm_with_fallback_async,
+    generate_emergency_local_verdict,
 )
 
 # Define request schema
@@ -102,7 +145,9 @@ def split_text_into_sentences(text: str) -> list[str]:
     sentences = re.split(r'(?<=[.!?])\s+', text)
     return [s.strip() for s in sentences if len(s.strip()) > 5]
 
-# 4. Expose Execution Routes
+# ---------------------------------------------------------
+# EXECUTION STREAMING ROUTE
+# ---------------------------------------------------------
 async def analyze_stream_generator(ticker_symbol: str, max_articles: int = 5):
     """Generator function that yields JSON chunks for streaming response"""
     
@@ -147,50 +192,22 @@ async def analyze_stream_generator(ticker_symbol: str, max_articles: int = 5):
                 yield json.dumps({"phase": "article_skipped", "article_index": idx, "reason": "No sentences extracted"}) + "\n"
                 continue
             
-            yield json.dumps({"phase": "gpu_processing", "article_index": idx, "sentence_count": len(sentences), "message": "Running GPU sentiment analysis..."}) + "\n"
+            yield json.dumps({"phase": "gpu_processing", "article_index": idx, "sentence_count": len(sentences), "message": "Running sentiment analysis..."}) + "\n"
                 
-            # Resolve model and tokenizer from app state (or lazy load fallback)
-            tokenizer = getattr(app.state, "tokenizer", None)
-            model = getattr(app.state, "model", None)
-            device = getattr(app.state, "device", DEVICE)
-
-            if tokenizer is None or model is None:
-                tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-                model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID)
-                model.to(device)
-                model.eval()
-                app.state.tokenizer = tokenizer
-                app.state.model = model
-                app.state.device = device
-
-            # Run batch calculation using proper tokenization & tensor device mapping
-            inputs = tokenizer(sentences, return_tensors="pt", truncation=True, padding=True, max_length=512)
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            
-            with torch.no_grad():
-                outputs = model(**inputs)
-                probs = torch.softmax(outputs.logits, dim=-1)
+            sentence_scores = []
+            for sent_idx, sentence in enumerate(sentences):
+                score_map = analyze_headline_sentiment(sentence)
+                pos = score_map.get("positive", score_map.get("label_2", 0.0))
+                neg = score_map.get("negative", score_map.get("label_0", 0.0))
+                net_score = pos - neg
+                sentence_scores.append(net_score)
                 
-                # Dynamic mapping based on model label count
-                if probs.shape[-1] == 3:
-                    # 3-Class (0: Negative, 1: Neutral, 2: Positive) -> Net sentiment: Positive - Negative
-                    sentence_scores = (probs[:, 2] - probs[:, 0]).tolist()
-                elif probs.shape[-1] == 2:
-                    # 2-Class (0: Negative, 1: Positive) -> Net sentiment: Positive - Negative
-                    sentence_scores = (probs[:, 1] - probs[:, 0]).tolist()
-                else:
-                    # Single continuous regression output
-                    sentence_scores = outputs.logits.squeeze(-1).tolist()
-                    if isinstance(sentence_scores, float):
-                        sentence_scores = [sentence_scores]
-            
-            for sent_idx, score in enumerate(sentence_scores):
                 yield json.dumps({
                     "phase": "sentence_processed",
                     "article_index": idx,
                     "sentence_index": sent_idx,
-                    "sentence": sentences[sent_idx][:100] + "..." if len(sentences[sent_idx]) > 100 else sentences[sent_idx],
-                    "score": round(score, 4),
+                    "sentence": sentence[:100] + "..." if len(sentence) > 100 else sentence,
+                    "score": round(net_score, 4),
                     "total_sentences": len(sentences)
                 }) + "\n"
                 
@@ -254,7 +271,7 @@ async def analyze_stream_generator(ticker_symbol: str, max_articles: int = 5):
     if not compiled_batch_metrics:
         compiled_batch_metrics.append(generate_baseline_telemetry_placeholder(ticker_symbol))
         
-    # Step 2 Progressive Streaming: Yield GPU sentiment telemetry results immediately
+    # Step 2 Progressive Streaming: Yield sentiment telemetry results immediately
     yield json.dumps({"phase": "sentiment_telemetry", "telemetry": compiled_batch_metrics}) + "\n"
     
     # Phase 2: Agentic Debate - execute independent agents concurrently across Gemini & Groq
@@ -304,7 +321,7 @@ async def analyze_stream_generator(ticker_symbol: str, max_articles: int = 5):
     You are a Quantitative Sentiment Analyst. Your job is to read the market's psychological state.
     Target Ticker: {ticker_symbol}
     
-    Raw GPU Pipeline Output (Sentiment Scores -1.0 to 1.0):
+    Raw Quantitative Pipeline Output (Sentiment Scores -1.0 to 1.0):
     {json.dumps(compiled_batch_metrics, indent=2)}
     
     Article Sample Size: {len(compiled_batch_metrics)} articles ingested.
@@ -457,6 +474,9 @@ async def analyze_stream_generator(ticker_symbol: str, max_articles: int = 5):
         }
     }) + "\n"
 
+# ---------------------------------------------------------
+# CURATED ASSET UNIVERSE & TICKER SEARCH
+# ---------------------------------------------------------
 GLOBAL_ASSET_UNIVERSE = [
     # US Mega-caps & Tech
     {"symbol": "NVDA", "name": "NVIDIA Corporation"},
