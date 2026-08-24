@@ -7,6 +7,8 @@ export interface StreamUpdate {
   message?: string;
   agent?: string;
   text?: string;
+  articles?: any[];
+  telemetry?: any[];
   article_index?: number;
   sentence_index?: number;
   sentence?: string;

@@ -1,4 +1,4 @@
-import { ExternalLink, TrendingDown, TrendingUp } from 'lucide-react';
+import { ExternalLink, TrendingDown, TrendingUp, Cpu } from 'lucide-react';
 import type { ArticleData } from '../types';
 import {
   formatDate,
@@ -12,8 +12,10 @@ interface ArticleCardProps {
 }
 
 export default function ArticleCard({ article, index }: ArticleCardProps) {
-  const colors = getSentimentColors(article.weighted_average);
-  const label = getSentimentLabel(article.weighted_average);
+  const hasTelemetry = typeof article.weighted_average === 'number';
+  const score = hasTelemetry ? article.weighted_average! : 0;
+  const colors = getSentimentColors(score);
+  const label = hasTelemetry ? getSentimentLabel(score) : 'INGESTED';
 
   return (
     <article
@@ -30,10 +32,11 @@ export default function ArticleCard({ article, index }: ArticleCardProps) {
           </time>
         </div>
         <span
-          className={`shrink-0 rounded-full border px-2.5 py-1 font-mono text-xs font-medium ${colors.badge}`}
+          className={`shrink-0 rounded-full border px-2.5 py-1 font-mono text-xs font-medium ${
+            hasTelemetry ? colors.badge : 'bg-slate-800 text-slate-400 border-slate-700'
+          }`}
         >
-          {label} ({article.weighted_average > 0 ? '+' : ''}
-          {article.weighted_average.toFixed(3)})
+          {label} {hasTelemetry ? `(${score > 0 ? '+' : ''}${score.toFixed(3)})` : ''}
         </span>
       </div>
 
@@ -47,37 +50,44 @@ export default function ArticleCard({ article, index }: ArticleCardProps) {
         View Source
       </a>
 
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        <div className="rounded-lg border border-red-500/30 bg-red-950/20 p-3">
-          <div className="mb-1.5 flex items-center gap-1.5">
-            <TrendingDown className="h-3.5 w-3.5 text-red-400" />
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-red-400">
-              Downside Trigger
+      {hasTelemetry && article.critical_downside_event && article.critical_upside_event ? (
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 transition-all duration-300">
+          <div className="rounded-lg border border-red-500/30 bg-red-950/20 p-3">
+            <div className="mb-1.5 flex items-center gap-1.5">
+              <TrendingDown className="h-3.5 w-3.5 text-red-400" />
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-red-400">
+                Downside Trigger
+              </span>
+            </div>
+            <p className="line-clamp-3 text-xs leading-relaxed text-slate-400">
+              {article.critical_downside_event.text_context}
+            </p>
+            <span className="mt-1.5 block font-mono text-[10px] text-red-400/70">
+              Score: {article.critical_downside_event.score.toFixed(3)}
             </span>
           </div>
-          <p className="line-clamp-3 text-xs leading-relaxed text-slate-400">
-            {article.critical_downside_event.text_context}
-          </p>
-          <span className="mt-1.5 block font-mono text-[10px] text-red-400/70">
-            Score: {article.critical_downside_event.score.toFixed(3)}
-          </span>
-        </div>
 
-        <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-3">
-          <div className="mb-1.5 flex items-center gap-1.5">
-            <TrendingUp className="h-3.5 w-3.5 text-emerald-400" />
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
-              Upside Trigger
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-3">
+            <div className="mb-1.5 flex items-center gap-1.5">
+              <TrendingUp className="h-3.5 w-3.5 text-emerald-400" />
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
+                Upside Trigger
+              </span>
+            </div>
+            <p className="line-clamp-3 text-xs leading-relaxed text-slate-400">
+              {article.critical_upside_event.text_context}
+            </p>
+            <span className="mt-1.5 block font-mono text-[10px] text-emerald-400/70">
+              Score: {article.critical_upside_event.score.toFixed(3)}
             </span>
           </div>
-          <p className="line-clamp-3 text-xs leading-relaxed text-slate-400">
-            {article.critical_upside_event.text_context}
-          </p>
-          <span className="mt-1.5 block font-mono text-[10px] text-emerald-400/70">
-            Score: {article.critical_upside_event.score.toFixed(3)}
-          </span>
         </div>
-      </div>
+      ) : (
+        <div className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2.5 text-xs text-slate-400">
+          <Cpu className="h-3.5 w-3.5 text-emerald-400 animate-pulse shrink-0" />
+          <span>Local GPU analyzing sentence sentiment & trigger vectors...</span>
+        </div>
+      )}
     </article>
   );
 }

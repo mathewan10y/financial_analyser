@@ -1,68 +1,138 @@
-import urllib.request
-import xml.etree.ElementTree as ET
-from datetime import datetime
-import html
+import sys
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
-def fetch_stock_news(ticker: str, max_articles: int = 5):
-    """
-    Fetches the latest news for a given ticker using the official Google News RSS feed.
-    Completely bulletproof because it parses structured XML rather than scraping HTML pages.
-    """
-    print(f"📡 Pulling official RSS feed for: {ticker} stock...")
+import time
+import requests
+import feedparser
+import re
+import urllib.parse
+from datetime import datetime, timezone
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8"
+}
+
+_orig_print = print
+def safe_print(*args, **kwargs):
+    """Safely prints messages even on Windows terminals with non-UTF8 encodings."""
+    try:
+        _orig_print(*args, **kwargs)
+    except UnicodeEncodeError:
+        text = " ".join(str(a) for a in args).encode("ascii", "replace").decode("ascii")
+        _orig_print(text, **kwargs)
+
+print = safe_print
+
+def generate_baseline_telemetry_placeholder(ticker: str) -> dict:
+    """Generates standard baseline telemetry placeholder tagged with is_dummy: True."""
+    return {
+        "headline": f"Market Baseline Telemetry for {ticker}",
+        "full_text": f"Baseline market telemetry operational for {ticker}.",
+        "date": datetime.now(timezone.utc).isoformat(),
+        "link": "#",
+        "is_dummy": True
+    }
+
+def fetch_news_for_ticker(
+    ticker: str,
+    min_articles: int = 3,
+    max_articles: int = 5,
+    timeout_seconds: float = 12.0
+) -> list[dict]:
+    clean_ticker = ticker.upper().strip()
+    collected = []
+    seen_links = set()
+    start_time = time.time()
     
-    # URL encode the query safely using standard libraries
-    query = urllib.parse.quote(f"{ticker} stock")
-    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+    base_symbol = re.sub(r'[\^=].*$', '', clean_ticker)
+    base_symbol = re.sub(r'\.[A-Z]{2,3}$', '', base_symbol)
+    
+    # 1. Expand the query cascade with longName
+    queries = [
+        f"{clean_ticker} stock news",
+        f"{base_symbol} stock market analysis"
+    ]
     
     try:
-        # Pretend to be a standard browser to avoid basic bot blocks
-        req = urllib.request.Request(
-            url, 
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        )
+        import yfinance as yf
+        info = yf.Ticker(clean_ticker).info or {}
+        long_name = info.get("longName", "")
+        short_name = info.get("shortName", "")
         
-        with urllib.request.urlopen(req, timeout=10) as response:
-            xml_data = response.read()
+        # Use full company name if available (e.g., "Tata Consultancy Services news")
+        if long_name:
+            clean_long = re.sub(r'(?i)\b(inc|ltd|corp|corporation|limited)\b\.?', '', long_name).strip()
+            queries.insert(0, f"{clean_long} stock news")
+            queries.insert(1, f"{clean_long} financial performance")
+        elif short_name:
+            queries.insert(0, f"{short_name} market news")
+    except Exception:
+        pass
+
+    queries = list(dict.fromkeys(queries))
+
+    print(f"📡 [Scraper] Ingesting news for {clean_ticker} across {len(queries)} query cascades...")
+
+    for search_query in queries:
+        if time.time() - start_time > timeout_seconds and len(collected) >= 1:
+            break
             
-        # Parse the XML data structure
-        root = ET.fromstring(xml_data)
+        encoded_query = urllib.parse.quote(search_query)
         
-        articles = []
-        # Find all <item> tags inside the XML channel
-        for item in root.findall('.//item')[:max_articles]:
-            title = item.find('title').text if item.find('title') is not None else ""
-            link = item.find('link').text if item.find('link') is not None else ""
-            pub_date = item.find('pubDate').text if item.find('pubDate') is not None else ""
-            description = item.find('description').text if item.find('description') is not None else ""
-            
-            # Clean up any HTML entities (like &amp; or &quot;) left in the XML strings
-            headline = html.unescape(title).strip()
-            summary = html.unescape(description).strip()
-            
-            # Simple text cleaning to strip out residual HTML tags if present in the summary
-            if "<" in summary:
-                import re
-                summary = re.sub(r'<[^>]+>', '', summary)
-                
-            full_text = f"{headline}. {summary}" if summary else headline
-            
-            # Convert RSS timestamp format (e.g., "Thu, 18 Jun 2026 07:00:00 GMT") into ISO strings
-            try:
-                parsed_time = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %Z")
-                formatted_date = parsed_time.isoformat() + "Z"
-            except Exception:
-                formatted_date = datetime.utcnow().isoformat() + "Z"
-                
-            articles.append({
-                "headline": headline,
-                "date": formatted_date,
-                "full_text": full_text,
-                "link": link
-            })
-            
-        print(f"✅ Successfully ingested {len(articles)} articles from RSS stream.")
-        return articles
+        # 2. REMOVE the US-only lock to allow global indexing
+        google_rss_url = f"https://news.google.com/rss/search?q={encoded_query}"
         
-    except Exception as e:
-        print(f"❌ Error during RSS data ingestion lifecycle: {e}")
-        return []
+        try:
+            resp = requests.get(google_rss_url, headers=HEADERS, timeout=5.0)
+            if resp.status_code == 200:
+                feed = feedparser.parse(resp.content)
+                for entry in feed.entries:
+                    link = getattr(entry, "link", "").strip()
+                    title = getattr(entry, "title", "").strip()
+                    title = re.sub(r'\s*-\s*[^-]+$', '', title).strip()
+                    
+                    if link and title and link not in seen_links:
+                        seen_links.add(link)
+                        
+                        pub_date = getattr(entry, "published", "")
+                        if pub_date and hasattr(entry, "published_parsed") and entry.published_parsed:
+                            try:
+                                dt = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+                                date_str = dt.isoformat()
+                            except Exception:
+                                date_str = datetime.now(timezone.utc).isoformat()
+                        else:
+                            date_str = datetime.now(timezone.utc).isoformat()
+                            
+                        collected.append({
+                            "headline": title,
+                            "full_text": title,
+                            "link": link,
+                            "date": date_str,
+                            "is_dummy": False
+                        })
+                        
+                        if len(collected) >= max_articles:
+                            return collected
+            else:
+                print(f"⚠️ [Scraper] RSS returned HTTP {resp.status_code} for '{search_query}'")
+        except Exception as e:
+            print(f"⚠️ [Scraper] Exception querying '{search_query}': {e}")
+            
+        if len(collected) >= min_articles:
+            return collected
+
+    if not collected:
+        print(f"⚠️ [Scraper] 0 articles found. Ingesting baseline telemetry placeholder.")
+        return [generate_baseline_telemetry_placeholder(clean_ticker)]
+        
+    return collected
+
+# Backward-compatibility alias
+fetch_stock_news = fetch_news_for_ticker

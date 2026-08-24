@@ -55,14 +55,21 @@ export function getVerdictStyles(decision: 'BUY' | 'HOLD' | 'SELL') {
   }
 }
 
-export function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+export function formatDate(iso?: string): string {
+  if (!iso || iso === 'Live' || iso === 'N/A') return 'Live Telemetry';
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return 'Live Telemetry';
+    return d.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return 'Live Telemetry';
+  }
 }
 
 export function parseReasoningSteps(text: string): string[] {

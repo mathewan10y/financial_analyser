@@ -7,9 +7,10 @@ export interface ArticleData {
   date: string;
   headline: string;
   link: string;
-  weighted_average: number;
-  critical_downside_event: CriticalEvent;
-  critical_upside_event: CriticalEvent;
+  full_text?: string;
+  weighted_average?: number;
+  critical_downside_event?: CriticalEvent;
+  critical_upside_event?: CriticalEvent;
 }
 
 export interface FinalVerdict {
