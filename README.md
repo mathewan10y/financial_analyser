@@ -17,18 +17,17 @@ An AI-driven, orchestrated pipeline for scraping, filtering, and analyzing finan
 * **Real-Time Visualization:** Interactive React dashboard featuring confidence rings, reasoning accordions, and verdict boards. 
 
 ## 📊 Dashboard Preview
-<div align="center">
-  <table border="0">
-    <tr>
-      <td><img src="assets/screenshots/scraping.png" alt="Live Data Scraping" width="100%"></td>
-      <td><img src="assets/screenshots/articles.png" alt="Ingested Articles Panel" width="100%"></td>
-    </tr>
-    <tr>
-      <td><img src="assets/screenshots/verdict.png" alt="Quantitative Verdict Panel" width="100%"></td>
-      <td><img src="assets/screenshots/cro.png" alt="Conflict Resolution Breakdown" width="100%"></td>
-    </tr>
-  </table>
-</div>
+
+
+<p align="center">
+  <img src="assets/screenshots/scraping1.png" alt="Live Data Scraping" width="49%">
+  <img src="assets/screenshots/articles1.png" alt="Ingested Articles Panel" width="49%">
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/verdict1.png" alt="Quantitative Verdict Panel" width="49%">
+  <img src="assets/screenshots/cro1.png" alt="Conflict Resolution Breakdown" width="49%">
+</p>
 
 ## 📋 Prerequisites
 Make sure you have the following installed:
@@ -45,6 +44,7 @@ cd backend
 ..\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python app.py
+``` 
 
 
 ### 2. Frontend Setup
