@@ -1,14 +1,22 @@
+import sys
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+import os
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-# 1. Load your newly trained model  and tokenizer
-# (Change './results' to match the output folder specified in your train.py)
-model_path = "./fine_tuned_financial_model" 
+# 1. Load model dynamically from Hugging Face Hub (or environment override)
+model_path = os.getenv("HF_MODEL_ID", "mathewan10y/synapse-financial-sentiment")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+print(f"📦 [Model Loader] Loading model from: {model_path} on {device}...")
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 model = AutoModelForSequenceClassification.from_pretrained(model_path)
-
-# Ensure it uses your GPU if available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 model.eval()
 

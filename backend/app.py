@@ -6,15 +6,17 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
+import os
 import re
 import json
 import asyncio
+import torch
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from transformers import pipeline
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from orchestrator import (
     get_financial_metrics,
     call_llm_with_fallback,
@@ -24,37 +26,53 @@ from orchestrator import (
     generate_emergency_local_verdict,
 )
 
+# Dynamic Model Configuration
+MODEL_ID = os.getenv("HF_MODEL_ID", "mathewan10y/synapse-financial-sentiment")
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 # Import local processing components
 from scraper import fetch_stock_news, generate_baseline_telemetry_placeholder
 from aggregator import aggregate_quant_sentiment
 from filter_agent import isolate_target_text  
 
-# 1. Define the Lifespan Handler for VRAM Preservation
+# 1. Define the Lifespan Handler for Dynamic Hugging Face Hub Model Loading
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Guarantees the transformer model weights load exactly once into VRAM.
-    Stores the model pipeline in app.state to protect against Uvicorn reload loops.
+    Guarantees transformer model weights load dynamically from Hugging Face Hub into compute memory.
+    Stores the model and tokenizer in app.state to protect against Uvicorn reload loops.
     """
-    print("⏳ [VRAM Init] Loading FinBERT sentiment model into local GPU memory...")
+    print(f"📦 [Model Loader] Loading sentiment weights from Hugging Face Hub: {MODEL_ID}...")
+    print(f"⚙️ [Hardware] Target compute device: {DEVICE}")
     try:
-        # Load directly onto the dedicated local GPU (device=0 for Quadro P600)
-        app.state.sentiment_pipeline = pipeline(
-            "sentiment-analysis", 
-            model="ProsusAI/finbert", 
-            device=0
-        )
-        print("✅ [VRAM Success] FinBERT successfully loaded into GPU memory (Device 0).")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+        model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID)
+        model.to(DEVICE)
+        model.eval()
+        app.state.tokenizer = tokenizer
+        app.state.model = model
+        app.state.device = DEVICE
+        print("✅ [Model Loader] Hugging Face model and tokenizer initialized successfully.")
     except Exception as e:
-        print(f"⚠️ [VRAM Warning] GPU allocation failed: {e}. Falling back to CPU.")
-        app.state.sentiment_pipeline = pipeline(
-            "sentiment-analysis", 
-            model="ProsusAI/finbert", 
-            device=-1
-        )
+        print(f"⚠️ [Model Loader] Error loading {MODEL_ID}: {e}")
+        print("🔄 [Model Loader] Falling back to default baseline / CPU pipeline...")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
+            model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
+            model.to("cpu")
+            model.eval()
+            app.state.tokenizer = tokenizer
+            app.state.model = model
+            app.state.device = "cpu"
+            print("✅ [Model Loader] Fallback CPU model loaded.")
+        except Exception as fallback_e:
+            print(f"❌ [Model Loader] Critical error initializing sentiment model: {fallback_e}")
+            app.state.tokenizer = None
+            app.state.model = None
+            app.state.device = "cpu"
     yield
     # Cleanup on server shutdown if necessary
-    print("🛑 [VRAM Cleanup] Unloading sentiment pipeline.")
+    print("🛑 [Model Loader] Unloading sentiment pipeline.")
 
 # 2. Instantiate the FastAPI App with state lifespan
 app = FastAPI(
@@ -87,9 +105,6 @@ def split_text_into_sentences(text: str) -> list[str]:
 # 4. Expose Execution Routes
 async def analyze_stream_generator(ticker_symbol: str, max_articles: int = 5):
     """Generator function that yields JSON chunks for streaming response"""
-    
-    # Pull the single loaded model out of the app state securely
-    sentiment_pipeline = app.state.sentiment_pipeline
     
     # Phase 1: Ingestion & Scraping - Emit immediate scraping phase
     yield json.dumps({"phase": "scraping", "message": "Fetching global market news and telemetry..."}) + "\n"
@@ -125,7 +140,7 @@ async def analyze_stream_generator(ticker_symbol: str, max_articles: int = 5):
                 yield json.dumps({"phase": "article_skipped", "article_index": idx, "reason": "Filtered as noise"}) + "\n"
                 continue
                 
-            # Split the CLEANED text into sentences for the local GPU
+            # Split the CLEANED text into sentences for sentiment extraction
             sentences = split_text_into_sentences(cleaned_text)
             
             if not sentences:
@@ -134,32 +149,48 @@ async def analyze_stream_generator(ticker_symbol: str, max_articles: int = 5):
             
             yield json.dumps({"phase": "gpu_processing", "article_index": idx, "sentence_count": len(sentences), "message": "Running GPU sentiment analysis..."}) + "\n"
                 
-            # Run calculations off our globally preserved pipeline state
-            raw_outputs = sentiment_pipeline(sentences)
+            # Resolve model and tokenizer from app state (or lazy load fallback)
+            tokenizer = getattr(app.state, "tokenizer", None)
+            model = getattr(app.state, "model", None)
+            device = getattr(app.state, "device", DEVICE)
+
+            if tokenizer is None or model is None:
+                tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+                model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID)
+                model.to(device)
+                model.eval()
+                app.state.tokenizer = tokenizer
+                app.state.model = model
+                app.state.device = device
+
+            # Run batch calculation using proper tokenization & tensor device mapping
+            inputs = tokenizer(sentences, return_tensors="pt", truncation=True, padding=True, max_length=512)
+            inputs = {k: v.to(device) for k, v in inputs.items()}
             
-            # Parse model classification mappings into float structures
-            sentence_scores = []
-            for sent_idx, out in enumerate(raw_outputs):
-                label = out.get("label")
-                raw_val = out.get("score", 0.0)
+            with torch.no_grad():
+                outputs = model(**inputs)
+                probs = torch.softmax(outputs.logits, dim=-1)
                 
-                # Map labels to numeric float values
-                if label == "POSITIVE" or label == "LABEL_1":
-                    score = raw_val
-                elif label == "NEGATIVE" or label == "LABEL_0":
-                    score = -raw_val
+                # Dynamic mapping based on model label count
+                if probs.shape[-1] == 3:
+                    # 3-Class (0: Negative, 1: Neutral, 2: Positive) -> Net sentiment: Positive - Negative
+                    sentence_scores = (probs[:, 2] - probs[:, 0]).tolist()
+                elif probs.shape[-1] == 2:
+                    # 2-Class (0: Negative, 1: Positive) -> Net sentiment: Positive - Negative
+                    sentence_scores = (probs[:, 1] - probs[:, 0]).tolist()
                 else:
-                    score = raw_val
-                    
-                sentence_scores.append(score)
-                
-                # Yield intermediate sentence result
+                    # Single continuous regression output
+                    sentence_scores = outputs.logits.squeeze(-1).tolist()
+                    if isinstance(sentence_scores, float):
+                        sentence_scores = [sentence_scores]
+            
+            for sent_idx, score in enumerate(sentence_scores):
                 yield json.dumps({
                     "phase": "sentence_processed",
                     "article_index": idx,
                     "sentence_index": sent_idx,
                     "sentence": sentences[sent_idx][:100] + "..." if len(sentences[sent_idx]) > 100 else sentences[sent_idx],
-                    "score": score,
+                    "score": round(score, 4),
                     "total_sentences": len(sentences)
                 }) + "\n"
                 

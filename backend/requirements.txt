@@ -1,8 +1,11 @@
-fastapi
-uvicorn
-transformers
 torch
-pydantic
+transformers
+requests
 feedparser
 beautifulsoup4
-requests
+yfinance
+groq
+fastapi
+uvicorn
+python-dotenv
+google-genai
