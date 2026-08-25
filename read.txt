@@ -11,9 +11,8 @@ The Technical Safeguard (Layer Freezing): To prevent "catastrophic forgetting"â€
 
 
 
-Here are the step-by-step instructions to train, test, and save your custom Financial Sentiment Analyzer using Python, Hugging Face transformers, and PyTorch.
-
-We will use DistilBERT, a fast and lightweight transformer model, and fine-tune it on the Financial PhraseBank dataset, which is specifically human-annotated for financial tone.
+Here are the step-by-step instructions done to train, test, and save the custom Financial Sentiment Analyzer using Python, Hugging Face transformers, and PyTorch.
+We used DistilBERT, a fast and lightweight transformer model, and fine-tune it on the Financial PhraseBank dataset, which is specifically human-annotated for financial tone.
 
 Step 1: Set Up Your Development Environment
 First, create a clean directory and a Python virtual environment to manage your dependencies. Open your terminal and run:
@@ -27,16 +26,12 @@ cd financial-sentiment-model
 python -m venv venv
 
 # Activate the virtual environment
-# On Windows:
 venv\Scripts\activate
-# On macOS/Linux:
-source venv/bin/activate
 
 # Install the required machine learning and data processing libraries
 pip install transformers[torch] datasets scikit-learn evaluate accelerate data-sets
 Step 2: Prepare the Training Script
 Create a new file named train.py in your project folder. This script handles downloading the dataset, tokenizing the text, running the fine-tuning loops, and saving the final weights.
-
 Paste the complete implementation into train.py
 
 Step 3: Run the Training Code
@@ -45,9 +40,7 @@ Execute the training script from your terminal:
 Bash
 python train.py
 What to expect: The script will download the model components and dataset (roughly 250MB total). It will then run 3 training epochs.
-
 Hardware tip: If you have an absolute bare-bones CPU setup, this might take 15â€“30 minutes. If you have a dedicated GPU, it should complete in under 2 minutes.
-
 Once it finishes, a new folder named fine_tuned_financial_model will appear containing files like config.json and model.safetensors.
 
 Step 4: Verify and Test Locally
@@ -100,3 +93,10 @@ Stage   Agent Name      Infrastructure   Task
 5       Orchestrator    Cloud (LLM API) Synthesizes Sentiment(from the QuantAggregator
                                          and gives a result), Fundamental analysis, & Macro data(macro econimics analysis) through different personas, and the Orchestrator finally gives decision.(uses api)
 
+
+deployment workflow:
+Here is a breakdown of how the data securely travels from the user to the model and back:
+-Vercel (Frontend Client): Uses VITE_API_URL to route the user's data (the HTTP request) over the internet to your FastAPI backend running on Render.
+-Render (Backend Server Proxy): Receives the data. It then reads the HF_TOKEN from its hidden server environment and packages it into a new request.
+-Hugging Face (Serverless Inference API): Receives the request from Render, validates the attached HF_TOKEN to ensure authorization and bypass anonymous rate limits, and processes the data through your machine learning model.
+The results then travel securely back down the chain: Hugging Face sends the prediction to Render, and Render streams the finalized multi-agent data back to Vercel for the user to see on the dashboard!

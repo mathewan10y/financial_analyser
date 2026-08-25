@@ -103,8 +103,8 @@ export default function Dashboard() {
       <div className="relative mx-auto max-w-[1440px] px-4 py-6 sm:px-6 lg:px-8">
         {/* Header & Global Control Bar */}
         <header className="mb-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4 border-b border-slate-800 pb-5">
-          <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-500/20 to-emerald-700/10 ring-1 ring-emerald-500/30 shadow-lg shadow-emerald-500/10">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-500/20 to-emerald-700/10 ring-1 ring-emerald-500/30 shadow-lg shadow-emerald-500/10 shrink-0">
               <Activity className="h-6 w-6 text-emerald-400" />
             </div>
             <div>
@@ -114,8 +114,8 @@ export default function Dashboard() {
                   QUANT v2.5
                 </span>
               </h1>
-              <p className="flex items-center gap-1.5 text-xs text-slate-400">
-                <Radio className="h-3 w-3 text-emerald-400 animate-pulse" />
+              <p className="flex flex-wrap items-center gap-1.5 text-xs sm:text-sm md:text-base text-slate-400">
+                <Radio className="h-3 w-3 text-emerald-400 animate-pulse shrink-0" />
                 Multi-Agent Autonomous Financial Sentiment Intelligence
               </p>
             </div>
@@ -177,7 +177,7 @@ export default function Dashboard() {
         <main className="relative z-10 space-y-6">
           {!hasRunOnce && !isRunning && !data ? (
             /* State A: Ready / Idle Welcome View */
-            <div className="rounded-2xl border border-slate-700/60 bg-terminal-panel/80 backdrop-blur-sm p-12 text-center shadow-xl">
+            <div className="max-w-full overflow-hidden rounded-2xl border border-slate-700/60 bg-terminal-panel/80 backdrop-blur-sm p-4 sm:p-8 text-center shadow-xl">
               <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-400 ring-1 ring-emerald-500/30 mb-4">
                 <Sparkles className="h-8 w-8" />
               </div>
@@ -187,13 +187,13 @@ export default function Dashboard() {
               <p className="text-sm text-slate-400 max-w-xl mx-auto mb-6 leading-relaxed">
                 Select a stock ticker symbol above (e.g. <span className="font-mono text-emerald-400 font-semibold">NVDA</span>, <span className="font-mono text-emerald-400 font-semibold">AAPL</span>, <span className="font-mono text-emerald-400 font-semibold">TSLA</span>) to dispatch our 5-agent parallel debate sequence and synthesize an institutional capital allocation verdict.
               </p>
-              <div className="inline-flex items-center gap-4 rounded-xl border border-slate-800 bg-slate-900/60 px-6 py-3 text-xs text-slate-400 font-mono">
+              <div className="inline-flex flex-col sm:flex-row flex-wrap items-center justify-center gap-4 sm:gap-2 rounded-xl border border-slate-800 bg-slate-900/60 p-4 sm:px-6 sm:py-3 text-xs text-slate-400 font-mono max-w-full">
                 <span>Phase 1: Deterministic Filter & GPU</span>
-                <span>•</span>
+                <span className="hidden sm:block text-slate-600">•</span>
                 <span>Phase 2: 3-Desk Parallel Debate</span>
-                <span>•</span>
+                <span className="hidden sm:block text-slate-600">•</span>
                 <span>Phase 3: CRO Risk Stress-Test</span>
-                <span>•</span>
+                <span className="hidden sm:block text-slate-600">•</span>
                 <span>Phase 4: Synthesis</span>
               </div>
             </div>
