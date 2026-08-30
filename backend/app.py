@@ -252,35 +252,60 @@ async def health_check():
 
 @app.get("/debug-hf")
 def debug_hf():
-    """Returns the raw HF API response for a fixed test sentence.
-    Use this endpoint to verify inference is working on the deployment.
+    """Diagnostic endpoint — tests api-inference.huggingface.co directly.
+    The Inference Router (router.huggingface.co) is intentionally skipped here
+    because it returns 400 for custom regression models.
     Hit: GET /debug-hf
     """
     test_sentence = "Earnings beat expectations significantly, stock surges to all-time high."
     hf_token = os.getenv("HF_TOKEN", "")
-    PRIMARY_URL  = f"https://router.huggingface.co/hf-inference/models/{MODEL_ID}"
-    FALLBACK_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
+    # Only test the classic API — the router doesn't support custom models
+    api_url = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
     headers = {
         "Authorization": f"Bearer {hf_token}",
         "Content-Type": "application/json",
         "x-use-cache": "false",
     }
-    for url in (PRIMARY_URL, FALLBACK_URL):
-        try:
-            resp = requests.post(url, headers=headers, params={"wait_for_model": "true"},
-                                 json={"inputs": test_sentence}, timeout=30)
-            return {
-                "url": url,
-                "status": resp.status_code,
-                "raw_body": resp.json(),
-                "parsed_score": analyze_headline_sentiment(test_sentence),
-                "hf_token_set": bool(hf_token),
-                "use_serverless": USE_SERVERLESS,
-                "model_id": MODEL_ID,
-            }
-        except requests.exceptions.ConnectionError:
-            continue
-    return {"error": "Both HF endpoints unreachable", "hf_token_set": bool(hf_token)}
+
+    # Check if DoH can resolve the hostname
+    doh_resolved_ip = None
+    try:
+        import urllib.request
+        doh_req = urllib.request.Request(
+            "https://dns.google/resolve?name=api-inference.huggingface.co&type=A",
+            headers={"accept": "application/dns-json"}
+        )
+        with urllib.request.urlopen(doh_req, timeout=5) as r:
+            doh_data = json.loads(r.read())
+            answers = doh_data.get("Answer", [])
+            if answers:
+                doh_resolved_ip = answers[0]["data"]
+    except Exception as doh_err:
+        doh_resolved_ip = f"DoH failed: {doh_err}"
+
+    try:
+        resp = requests.post(
+            api_url, headers=headers,
+            params={"wait_for_model": "true"},
+            json={"inputs": test_sentence}, timeout=30
+        )
+        return {
+            "api_url": api_url,
+            "status": resp.status_code,
+            "raw_body": resp.json(),
+            "parsed_score": analyze_headline_sentiment(test_sentence),
+            "doh_resolved_ip": doh_resolved_ip,
+            "hf_token_set": bool(hf_token),
+            "use_serverless": USE_SERVERLESS,
+            "model_id": MODEL_ID,
+        }
+    except requests.exceptions.ConnectionError as ce:
+        return {
+            "error": f"ConnectionError: {ce}",
+            "doh_resolved_ip": doh_resolved_ip,
+            "hint": "DoH patch should have resolved this. Check if dns.google itself is reachable.",
+            "hf_token_set": bool(hf_token),
+        }
 
 
 # Import local processing components
