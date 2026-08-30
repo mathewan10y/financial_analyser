@@ -252,60 +252,57 @@ async def health_check():
 
 @app.get("/debug-hf")
 def debug_hf():
-    """Diagnostic endpoint — tests api-inference.huggingface.co directly.
-    The Inference Router (router.huggingface.co) is intentionally skipped here
-    because it returns 400 for custom regression models.
-    Hit: GET /debug-hf
+    """Full DNS diagnostic for api-inference.huggingface.co.
+    Checks A, AAAA, and CNAME records via Google DoH, then attempts the actual API call.
     """
-    test_sentence = "Earnings beat expectations significantly, stock surges to all-time high."
+    import urllib.request
+
     hf_token = os.getenv("HF_TOKEN", "")
-    # Only test the classic API — the router doesn't support custom models
-    api_url = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
+    target_host = "api-inference.huggingface.co"
+    dns_report = {}
+
+    # ── DNS survey (A, AAAA, CNAME) via Google DoH ──────────────────────────
+    for rtype in ("A", "AAAA", "CNAME"):
+        try:
+            req = urllib.request.Request(
+                f"https://dns.google/resolve?name={target_host}&type={rtype}",
+                headers={"accept": "application/dns-json"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as r:
+                data = json.loads(r.read())
+                answers = data.get("Answer", [])
+                dns_report[rtype] = [a["data"] for a in answers] if answers else []
+                dns_report[f"{rtype}_status"] = data.get("Status", -1)
+        except Exception as e:
+            dns_report[rtype] = f"error: {e}"
+
+    # ── Try the actual API call ──────────────────────────────────────────────
+    api_url = f"https://{target_host}/models/{MODEL_ID}"
     headers = {
         "Authorization": f"Bearer {hf_token}",
         "Content-Type": "application/json",
         "x-use-cache": "false",
     }
-
-    # Check if DoH can resolve the hostname
-    doh_resolved_ip = None
-    try:
-        import urllib.request
-        doh_req = urllib.request.Request(
-            "https://dns.google/resolve?name=api-inference.huggingface.co&type=A",
-            headers={"accept": "application/dns-json"}
-        )
-        with urllib.request.urlopen(doh_req, timeout=5) as r:
-            doh_data = json.loads(r.read())
-            answers = doh_data.get("Answer", [])
-            if answers:
-                doh_resolved_ip = answers[0]["data"]
-    except Exception as doh_err:
-        doh_resolved_ip = f"DoH failed: {doh_err}"
-
+    api_result = {}
     try:
         resp = requests.post(
             api_url, headers=headers,
             params={"wait_for_model": "true"},
-            json={"inputs": test_sentence}, timeout=30
+            json={"inputs": "Earnings beat all expectations, stock surges."}, timeout=30
         )
-        return {
-            "api_url": api_url,
-            "status": resp.status_code,
-            "raw_body": resp.json(),
-            "parsed_score": analyze_headline_sentiment(test_sentence),
-            "doh_resolved_ip": doh_resolved_ip,
-            "hf_token_set": bool(hf_token),
-            "use_serverless": USE_SERVERLESS,
-            "model_id": MODEL_ID,
-        }
-    except requests.exceptions.ConnectionError as ce:
-        return {
-            "error": f"ConnectionError: {ce}",
-            "doh_resolved_ip": doh_resolved_ip,
-            "hint": "DoH patch should have resolved this. Check if dns.google itself is reachable.",
-            "hf_token_set": bool(hf_token),
-        }
+        api_result = {"status": resp.status_code, "body": resp.json()}
+    except Exception as e:
+        api_result = {"error": repr(e)}
+
+    return {
+        "target_host": target_host,
+        "dns_via_google_doh": dns_report,
+        "api_result": api_result,
+        "parsed_score": analyze_headline_sentiment("Earnings beat all expectations, stock surges."),
+        "hf_token_set": bool(hf_token),
+        "use_serverless": USE_SERVERLESS,
+        "model_id": MODEL_ID,
+    }
 
 
 # Import local processing components
