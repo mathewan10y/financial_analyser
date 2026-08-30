@@ -83,7 +83,10 @@ def analyze_headline_sentiment(text: str) -> dict:
     # AND the fallback path where local model loading failed at startup).
     hf_token = os.getenv("HF_TOKEN", "")
     if USE_SERVERLESS or (hf_token and _local_model is None):
-        api_url = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
+        # router.huggingface.co resolves correctly on Render and most networks.
+        # api-inference.huggingface.co is used as a secondary fallback.
+        PRIMARY_URL  = f"https://router.huggingface.co/hf-inference/models/{MODEL_ID}"
+        FALLBACK_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
         headers = {
             "Authorization": f"Bearer {hf_token}",
             "Content-Type": "application/json",
@@ -92,17 +95,31 @@ def analyze_headline_sentiment(text: str) -> dict:
         params = {"wait_for_model": "true"}
 
         def _call_hf_api(input_text: str) -> float:
-            """POST to HF Inference API and extract the raw regression score."""
-            resp = requests.post(
-                api_url,
-                headers=headers,
-                params=params,
-                json={"inputs": input_text},
-                timeout=30,
-            )
-            print(f"🔍 [HF Status] {resp.status_code} | body: {resp.text[:300]}")
-            resp.raise_for_status()
-            data = resp.json()
+            """POST to HF Inference API and extract the raw regression score.
+            Tries the Inference Router first (resolves on most hosts),
+            then falls back to the classic api-inference subdomain.
+            """
+            last_exc = None
+            for url in (PRIMARY_URL, FALLBACK_URL):
+                try:
+                    resp = requests.post(
+                        url,
+                        headers=headers,
+                        params=params,
+                        json={"inputs": input_text},
+                        timeout=30,
+                    )
+                    print(f"\ud83d\udd0d [HF Status] {resp.status_code} | url={url.split('/')[2]} | body: {resp.text[:200]}")
+                    resp.raise_for_status()
+                    data = resp.json()
+                    break  # success — stop trying URLs
+                except requests.exceptions.ConnectionError as ce:
+                    print(f"\u26a0\ufe0f [HF DNS fail] {url.split('/')[2]}: {ce}")
+                    last_exc = ce
+                    continue  # try next URL
+            else:
+                # both URLs failed
+                raise last_exc
 
             raw = 0.0
 
@@ -144,7 +161,7 @@ def analyze_headline_sentiment(text: str) -> dict:
         try:
             raw_score = _call_hf_api(text)
         except Exception as e:
-            print(f"⚠️ [Inference Exception]: {repr(e)}")
+            print(f"\u26a0\ufe0f [Inference Exception]: {repr(e)}")
             traceback.print_exc()
             return {"neutral": 1.0, "positive": 0.0, "negative": 0.0, "score": 0.0}
 
