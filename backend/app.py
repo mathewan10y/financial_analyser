@@ -123,21 +123,21 @@ def analyze_headline_sentiment(text: str) -> dict:
 
             raw = 0.0
 
-            # [[{"label": "LABEL_0", "score": <sigmoid(logit)>}]]  (standard text-classification)
+            # [[{"label": "LABEL_0", "score": X}]]
+            # For problem_type="regression", HF returns the raw logit directly (no sigmoid).
+            # X is the model's raw continuous prediction, typically in [-1, +1].
             if (
                 isinstance(data, list) and len(data) > 0
                 and isinstance(data[0], list) and len(data[0]) > 0
                 and isinstance(data[0][0], dict)
             ):
-                sig = float(data[0][0].get("score", 0.5))
-                raw = sig * 2.0 - 1.0  # un-sigmoid to [-1, +1]
+                raw = float(data[0][0].get("score", 0.0))
 
             # [{"label": ..., "score": X}]
             elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
-                sig = float(data[0].get("score", 0.5))
-                raw = sig * 2.0 - 1.0
+                raw = float(data[0].get("score", 0.0))
 
-            # [[-0.353]]  raw nested float
+            # [[-0.353]]  nested raw float
             elif (
                 isinstance(data, list) and len(data) > 0
                 and isinstance(data[0], list) and len(data[0]) > 0
@@ -153,8 +153,7 @@ def analyze_headline_sentiment(text: str) -> dict:
             elif isinstance(data, dict):
                 if "error" in data:
                     raise RuntimeError(f"HF API error: {data['error']}")
-                sig = float(data.get("score", 0.5))
-                raw = sig * 2.0 - 1.0
+                raw = float(data.get("score", 0.0))
 
             return max(-1.0, min(1.0, raw))
 
@@ -207,6 +206,39 @@ async def health_check():
         "service": "synapse-backend",
         "mode": "serverless" if USE_SERVERLESS else "local"
     }
+
+
+@app.get("/debug-hf")
+def debug_hf():
+    """Returns the raw HF API response for a fixed test sentence.
+    Use this endpoint to verify inference is working on the deployment.
+    Hit: GET /debug-hf
+    """
+    test_sentence = "Earnings beat expectations significantly, stock surges to all-time high."
+    hf_token = os.getenv("HF_TOKEN", "")
+    PRIMARY_URL  = f"https://router.huggingface.co/hf-inference/models/{MODEL_ID}"
+    FALLBACK_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
+    headers = {
+        "Authorization": f"Bearer {hf_token}",
+        "Content-Type": "application/json",
+        "x-use-cache": "false",
+    }
+    for url in (PRIMARY_URL, FALLBACK_URL):
+        try:
+            resp = requests.post(url, headers=headers, params={"wait_for_model": "true"},
+                                 json={"inputs": test_sentence}, timeout=30)
+            return {
+                "url": url,
+                "status": resp.status_code,
+                "raw_body": resp.json(),
+                "parsed_score": analyze_headline_sentiment(test_sentence),
+                "hf_token_set": bool(hf_token),
+                "use_serverless": USE_SERVERLESS,
+                "model_id": MODEL_ID,
+            }
+        except requests.exceptions.ConnectionError:
+            continue
+    return {"error": "Both HF endpoints unreachable", "hf_token_set": bool(hf_token)}
 
 
 # Import local processing components
