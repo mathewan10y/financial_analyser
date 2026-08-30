@@ -98,14 +98,24 @@ def analyze_headline_sentiment(text: str) -> dict:
             inputs = _local_tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
             inputs = {k: v.to(_device) for k, v in inputs.items()}
             with torch.no_grad():
-                logits = _local_model(**inputs).logits
-                probs = torch.softmax(logits, dim=-1)[0].tolist()
-            
-            id2label = getattr(_local_model.config, "id2label", {0: "negative", 1: "neutral", 2: "positive"})
-            return {id2label.get(i, f"label_{i}").lower(): p for i, p in enumerate(probs)}
+                # Extract the single continuous float (-1.0 to 1.0)
+                raw_score = _local_model(**inputs).logits.squeeze().item()
+
+            # Translate the continuous score into the dictionary the aggregator expects
+            # (positive - negative) == raw_score, which preserves the signed signal.
+            pos_val = raw_score if raw_score > 0 else 0.0
+            neg_val = abs(raw_score) if raw_score < 0 else 0.0
+            neu_val = max(0.0, 1.0 - abs(raw_score))
+
+            return {
+                "positive": pos_val,
+                "negative": neg_val,
+                "neutral": neu_val,
+                "score": raw_score
+            }
         except Exception as e:
             print(f"⚠️ [Local Inference Error] {e}")
-            return {"neutral": 0.5, "positive": 0.25, "negative": 0.25}
+            return {"neutral": 1.0, "positive": 0.0, "negative": 0.0}
 
     return {"neutral": 1.0, "positive": 0.0, "negative": 0.0}
 
