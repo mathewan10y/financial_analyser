@@ -9,7 +9,10 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 import os
 import re
 import json
+import time
 import asyncio
+import traceback
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -82,45 +85,76 @@ def analyze_headline_sentiment(text: str) -> dict:
         return {"neutral": 1.0, "positive": 0.0, "negative": 0.0, "score": 0.0}
 
     # 1. Cloud Serverless Route
-    # 1. Cloud Serverless Route
-    if USE_SERVERLESS and _hf_client is not None:
+    if USE_SERVERLESS:
+        hf_token = os.getenv("HF_TOKEN", "")
+        api_url = f"https://router.huggingface.co/hf-inference/models/{MODEL_ID}"
+        headers = {"Authorization": f"Bearer {hf_token}", "Content-Type": "application/json"}
+
+        def _call_hf_api() -> dict:
+            """Makes the HTTP POST and parses the raw_score from any known HF response shape."""
+            resp = requests.post(api_url, headers=headers, json={"inputs": text}, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            print(f"🔍 [HF Raw Response] {data}")
+
+            raw = 0.0
+
+            # Shape 1: [[{"label": "LABEL_0", "score": X}]] — regression via Inference Router
+            if (
+                isinstance(data, list) and len(data) > 0
+                and isinstance(data[0], list) and len(data[0]) > 0
+                and isinstance(data[0][0], dict)
+            ):
+                raw = float(data[0][0].get("score", 0.0))
+
+            # Shape 2: [{"label": ..., "score": X}]
+            elif (
+                isinstance(data, list) and len(data) > 0
+                and isinstance(data[0], dict)
+            ):
+                raw = float(data[0].get("score", 0.0))
+
+            # Shape 3: [[-0.353]] — nested list of floats
+            elif (
+                isinstance(data, list) and len(data) > 0
+                and isinstance(data[0], list) and len(data[0]) > 0
+                and isinstance(data[0][0], (float, int))
+            ):
+                raw = float(data[0][0])
+
+            # Shape 4: [-0.353] — flat list of floats
+            elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], (float, int)):
+                raw = float(data[0])
+
+            # Shape 5: {"score": X} or {"error": "..."}
+            elif isinstance(data, dict):
+                if "error" in data:
+                    raise ValueError(f"HF API error: {data['error']} | estimated_time={data.get('estimated_time')}")
+                raw = float(data.get("score", 0.0))
+
+            return raw
+
         try:
-            import json
-            response = _hf_client.post(json={"inputs": text}, model=MODEL_ID)
-            data = json.loads(response.decode("utf-8"))
-            
-            raw_score = 0.0
-            
-            # Scenario A: Hugging Face returns a flat list of floats e.g., [[-0.353]] or [-0.353]
-            if isinstance(data, list) and len(data) > 0:
-                if isinstance(data[0], list) and len(data[0]) > 0 and isinstance(data[0][0], (float, int)):
-                    raw_score = float(data[0][0])
-                elif isinstance(data[0], (float, int)):
-                    raw_score = float(data[0])
-                # Scenario B: Hugging Face returns a list of dicts e.g., [[{"score": -0.353}]]
-                elif isinstance(data[0], list) and len(data[0]) > 0 and isinstance(data[0][0], dict):
-                    raw_score = float(data[0][0].get("score", 0.0))
-                elif isinstance(data[0], dict):
-                    raw_score = float(data[0].get("score", 0.0))
-            # Scenario C: Hugging Face returns an error dictionary (e.g., Model is loading)
-            elif isinstance(data, dict) and "error" in data:
-                print(f"⚠️ [HF API Error]: {data['error']}")
+            raw_score = _call_hf_api()
+        except ValueError as ve:
+            # Model is still loading — retry once after a brief sleep
+            print(f"⚠️ [HF Loading] {ve}. Retrying in 1.5s...")
+            time.sleep(1.5)
+            try:
+                raw_score = _call_hf_api()
+            except Exception as e2:
+                print(f"⚠️ [Inference Exception]: {repr(e2)}")
+                traceback.print_exc()
                 return {"neutral": 1.0, "positive": 0.0, "negative": 0.0, "score": 0.0}
-
-            # Translate to aggregator format so (positive - negative) = raw_score
-            pos_val = raw_score if raw_score > 0 else 0.0
-            neg_val = abs(raw_score) if raw_score < 0 else 0.0
-            neu_val = max(0.0, 1.0 - abs(raw_score))
-
-            return {
-                "positive": pos_val,
-                "negative": neg_val,
-                "neutral": neu_val,
-                "score": raw_score
-            }
         except Exception as e:
-            print(f"⚠️ [Serverless API Warning] {e}")
+            print(f"⚠️ [Inference Exception]: {repr(e)}")
+            traceback.print_exc()
             return {"neutral": 1.0, "positive": 0.0, "negative": 0.0, "score": 0.0}
+
+        pos_val = max(0.0, raw_score)
+        neg_val = max(0.0, -raw_score)
+        neu_val = max(0.0, 1.0 - abs(raw_score))
+        return {"positive": pos_val, "negative": neg_val, "neutral": neu_val, "score": raw_score}
 
     # 2. Local PyTorch Route
     if _local_model is not None and _local_tokenizer is not None:
@@ -235,9 +269,14 @@ async def analyze_stream_generator(ticker_symbol: str, max_articles: int = 5):
             sentence_scores = []
             for sent_idx, sentence in enumerate(sentences):
                 score_map = analyze_headline_sentiment(sentence)
-                pos = score_map.get("positive", score_map.get("label_2", 0.0))
-                neg = score_map.get("negative", score_map.get("label_0", 0.0))
-                net_score = pos - neg
+                # Prefer the direct signed float from the regression model;
+                # fall back to (positive - negative) for classifier-style dicts.
+                if "score" in score_map:
+                    net_score = float(score_map["score"])
+                else:
+                    pos = float(score_map.get("positive", score_map.get("label_2", 0.0)))
+                    neg = float(score_map.get("negative", score_map.get("label_0", 0.0)))
+                    net_score = pos - neg
                 sentence_scores.append(net_score)
                 
                 yield json.dumps({
