@@ -10,9 +10,46 @@ import os
 import re
 import json
 import time
+import socket
 import asyncio
 import traceback
 import requests
+
+# ---------------------------------------------------------------------------
+# DNS FALLBACK PATCH
+# Render's network cannot resolve api-inference.huggingface.co via local DNS.
+# This patch retries any failed getaddrinfo call via Google DNS-over-HTTPS,
+# which is reachable on all networks. No extra dependencies required.
+# ---------------------------------------------------------------------------
+_ORIG_GETADDRINFO = socket.getaddrinfo
+_DOH_FALLBACK_HOSTS = {"api-inference.huggingface.co"}
+
+def _getaddrinfo_with_doh_fallback(host, port, family=0, type=0, proto=0, flags=0):
+    try:
+        return _ORIG_GETADDRINFO(host, port, family, type, proto, flags)
+    except socket.gaierror:
+        if host in _DOH_FALLBACK_HOSTS:
+            try:
+                import urllib.request
+                doh_req = urllib.request.Request(
+                    f"https://dns.google/resolve?name={host}&type=A",
+                    headers={"accept": "application/dns-json"}
+                )
+                with urllib.request.urlopen(doh_req, timeout=5) as r:
+                    data = json.loads(r.read())
+                    answers = data.get("Answer", [])
+                    if answers:
+                        ip = answers[0]["data"]
+                        print(f"\ud83d\udce1 [DoH] Resolved {host} -> {ip} via dns.google")
+                        return [
+                            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)),
+                            (socket.AF_INET, socket.SOCK_DGRAM, 17, "", (ip, port)),
+                        ]
+            except Exception as doh_err:
+                print(f"\u26a0\ufe0f [DoH fallback failed] {doh_err}")
+        raise
+
+socket.getaddrinfo = _getaddrinfo_with_doh_fallback
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -96,11 +133,13 @@ def analyze_headline_sentiment(text: str) -> dict:
 
         def _call_hf_api(input_text: str) -> float:
             """POST to HF Inference API and extract the raw regression score.
-            Tries the Inference Router first (resolves on most hosts),
-            then falls back to the classic api-inference subdomain.
+            Tries the classic Inference API first (supports all Hub models).
+            Falls back to the Inference Router if the classic API is unavailable.
+            The DoH patch above ensures api-inference.huggingface.co resolves
+            even when Render's local DNS doesn't have it.
             """
             last_exc = None
-            for url in (PRIMARY_URL, FALLBACK_URL):
+            for url in (FALLBACK_URL, PRIMARY_URL):  # classic API first, router as backup
                 try:
                     resp = requests.post(
                         url,
@@ -110,16 +149,19 @@ def analyze_headline_sentiment(text: str) -> dict:
                         timeout=30,
                     )
                     print(f"\ud83d\udd0d [HF Status] {resp.status_code} | url={url.split('/')[2]} | body: {resp.text[:200]}")
+                    if resp.status_code in (400, 422, 503) and "not supported" in resp.text.lower():
+                        # This provider doesn't support the model — try the next URL
+                        last_exc = RuntimeError(f"Provider rejected model: {resp.text[:100]}")
+                        continue
                     resp.raise_for_status()
                     data = resp.json()
-                    break  # success — stop trying URLs
+                    break  # success
                 except requests.exceptions.ConnectionError as ce:
                     print(f"\u26a0\ufe0f [HF DNS fail] {url.split('/')[2]}: {ce}")
                     last_exc = ce
-                    continue  # try next URL
+                    continue
             else:
-                # both URLs failed
-                raise last_exc
+                raise last_exc if last_exc else RuntimeError("All HF endpoints failed")
 
             raw = 0.0
 
