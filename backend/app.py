@@ -82,19 +82,32 @@ def analyze_headline_sentiment(text: str) -> dict:
         return {"neutral": 1.0, "positive": 0.0, "negative": 0.0, "score": 0.0}
 
     # 1. Cloud Serverless Route
+    # 1. Cloud Serverless Route
     if USE_SERVERLESS and _hf_client is not None:
         try:
             import json
-            # Use raw POST to bypass the strict classification wrapper
             response = _hf_client.post(json={"inputs": text}, model=MODEL_ID)
             data = json.loads(response.decode("utf-8"))
             
-            # HF Regression output is typically nested: [[{"label": "LABEL_0", "score": -0.353}]]
             raw_score = 0.0
-            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list) and len(data[0]) > 0:
-                raw_score = float(data[0][0].get("score", 0.0))
             
-            # Translate to aggregator format
+            # Scenario A: Hugging Face returns a flat list of floats e.g., [[-0.353]] or [-0.353]
+            if isinstance(data, list) and len(data) > 0:
+                if isinstance(data[0], list) and len(data[0]) > 0 and isinstance(data[0][0], (float, int)):
+                    raw_score = float(data[0][0])
+                elif isinstance(data[0], (float, int)):
+                    raw_score = float(data[0])
+                # Scenario B: Hugging Face returns a list of dicts e.g., [[{"score": -0.353}]]
+                elif isinstance(data[0], list) and len(data[0]) > 0 and isinstance(data[0][0], dict):
+                    raw_score = float(data[0][0].get("score", 0.0))
+                elif isinstance(data[0], dict):
+                    raw_score = float(data[0].get("score", 0.0))
+            # Scenario C: Hugging Face returns an error dictionary (e.g., Model is loading)
+            elif isinstance(data, dict) and "error" in data:
+                print(f"⚠️ [HF API Error]: {data['error']}")
+                return {"neutral": 1.0, "positive": 0.0, "negative": 0.0, "score": 0.0}
+
+            # Translate to aggregator format so (positive - negative) = raw_score
             pos_val = raw_score if raw_score > 0 else 0.0
             neg_val = abs(raw_score) if raw_score < 0 else 0.0
             neu_val = max(0.0, 1.0 - abs(raw_score))
@@ -106,8 +119,8 @@ def analyze_headline_sentiment(text: str) -> dict:
                 "score": raw_score
             }
         except Exception as e:
-            print(f"⚠️ [Serverless API Warning] {e}. Providing baseline fallback.")
-            return {"neutral": 0.5, "positive": 0.25, "negative": 0.25, "score": 0.0}
+            print(f"⚠️ [Serverless API Warning] {e}")
+            return {"neutral": 1.0, "positive": 0.0, "negative": 0.0, "score": 0.0}
 
     # 2. Local PyTorch Route
     if _local_model is not None and _local_tokenizer is not None:
