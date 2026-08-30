@@ -50,9 +50,6 @@ _device = "cpu"
 
 if USE_SERVERLESS:
     print(f"☁️ [Mode] Cloud Serverless Inference active: {MODEL_ID}")
-    from huggingface_hub import InferenceClient
-    hf_token = os.getenv("HF_TOKEN")
-    _hf_client = InferenceClient(token=hf_token)
 else:
     print(f"💻 [Mode] Local Model Execution requested: {MODEL_ID}")
     try:
@@ -69,10 +66,8 @@ else:
         print("✅ [Model Loader] Local model loaded successfully.")
     except Exception as e:
         print(f"⚠️ [Model Loader] Local PyTorch load failed: {e}")
-        print("🔄 [Model Loader] Falling back to Hugging Face Serverless API...")
-        from huggingface_hub import InferenceClient
-        USE_SERVERLESS = True
-        _hf_client = InferenceClient(token=os.getenv("HF_TOKEN"))
+        print("🔄 [Model Loader] Will use Hugging Face Serverless API instead.")
+        USE_SERVERLESS = True  # module-level update so the function sees it
 
 
 def analyze_headline_sentiment(text: str) -> dict:
@@ -84,16 +79,15 @@ def analyze_headline_sentiment(text: str) -> dict:
     if not text or not text.strip():
         return {"neutral": 1.0, "positive": 0.0, "negative": 0.0, "score": 0.0}
 
-    # 1. Cloud Serverless Route
-    if USE_SERVERLESS:
-        hf_token = os.getenv("HF_TOKEN", "")
-        # Standard HF Inference API — works for any public or private model.
-        # ?wait_for_model=true handles cold-start server-side (avoids manual retry loop).
+    # Prefer the HF API whenever a token is available (covers both USE_SERVERLESS=true
+    # AND the fallback path where local model loading failed at startup).
+    hf_token = os.getenv("HF_TOKEN", "")
+    if USE_SERVERLESS or (hf_token and _local_model is None):
         api_url = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
         headers = {
             "Authorization": f"Bearer {hf_token}",
             "Content-Type": "application/json",
-            "x-use-cache": "false",   # always get a fresh prediction
+            "x-use-cache": "false",
         }
         params = {"wait_for_model": "true"}
 
@@ -112,27 +106,21 @@ def analyze_headline_sentiment(text: str) -> dict:
 
             raw = 0.0
 
-            # HF text-classification pipeline with num_labels=1 typically returns:
-            # [[{"label": "LABEL_0", "score": <sigmoid(logit)>}]]
-            # The sigmoid maps negative logits → <0.5 and positive logits → >0.5.
-            # We convert back: raw_logit ≈ score*2 - 1  (linear rescale 0–1 → -1 to 1)
+            # [[{"label": "LABEL_0", "score": <sigmoid(logit)>}]]  (standard text-classification)
             if (
                 isinstance(data, list) and len(data) > 0
                 and isinstance(data[0], list) and len(data[0]) > 0
                 and isinstance(data[0][0], dict)
             ):
                 sig = float(data[0][0].get("score", 0.5))
-                raw = sig * 2.0 - 1.0   # un-sigmoid: maps [0,1] → [-1,+1]
+                raw = sig * 2.0 - 1.0  # un-sigmoid to [-1, +1]
 
-            # [{"label": ..., "score": X}] — flat list of dicts
-            elif (
-                isinstance(data, list) and len(data) > 0
-                and isinstance(data[0], dict)
-            ):
+            # [{"label": ..., "score": X}]
+            elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
                 sig = float(data[0].get("score", 0.5))
                 raw = sig * 2.0 - 1.0
 
-            # [[-0.353]] — nested list of raw floats (regression pipeline)
+            # [[-0.353]]  raw nested float
             elif (
                 isinstance(data, list) and len(data) > 0
                 and isinstance(data[0], list) and len(data[0]) > 0
@@ -140,7 +128,7 @@ def analyze_headline_sentiment(text: str) -> dict:
             ):
                 raw = float(data[0][0])
 
-            # [-0.353] — flat list of raw floats
+            # [-0.353]  flat raw float
             elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], (float, int)):
                 raw = float(data[0])
 
@@ -151,7 +139,6 @@ def analyze_headline_sentiment(text: str) -> dict:
                 sig = float(data.get("score", 0.5))
                 raw = sig * 2.0 - 1.0
 
-            # Clamp to valid range
             return max(-1.0, min(1.0, raw))
 
         try:
