@@ -79,17 +79,35 @@ def analyze_headline_sentiment(text: str) -> dict:
     Returns: dict mapping sentiment labels to normalized probability scores.
     """
     if not text or not text.strip():
-        return {"neutral": 1.0, "positive": 0.0, "negative": 0.0}
+        return {"neutral": 1.0, "positive": 0.0, "negative": 0.0, "score": 0.0}
 
     # 1. Cloud Serverless Route
     if USE_SERVERLESS and _hf_client is not None:
         try:
-            results = _hf_client.text_classification(text=text, model=MODEL_ID)
-            score_map = {res.label.lower(): float(res.score) for res in results}
-            return score_map
+            import json
+            # Use raw POST to bypass the strict classification wrapper
+            response = _hf_client.post(json={"inputs": text}, model=MODEL_ID)
+            data = json.loads(response.decode("utf-8"))
+            
+            # HF Regression output is typically nested: [[{"label": "LABEL_0", "score": -0.353}]]
+            raw_score = 0.0
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list) and len(data[0]) > 0:
+                raw_score = float(data[0][0].get("score", 0.0))
+            
+            # Translate to aggregator format
+            pos_val = raw_score if raw_score > 0 else 0.0
+            neg_val = abs(raw_score) if raw_score < 0 else 0.0
+            neu_val = max(0.0, 1.0 - abs(raw_score))
+
+            return {
+                "positive": pos_val,
+                "negative": neg_val,
+                "neutral": neu_val,
+                "score": raw_score
+            }
         except Exception as e:
             print(f"⚠️ [Serverless API Warning] {e}. Providing baseline fallback.")
-            return {"neutral": 0.5, "positive": 0.25, "negative": 0.25}
+            return {"neutral": 0.5, "positive": 0.25, "negative": 0.25, "score": 0.0}
 
     # 2. Local PyTorch Route
     if _local_model is not None and _local_tokenizer is not None:
@@ -101,8 +119,6 @@ def analyze_headline_sentiment(text: str) -> dict:
                 # Extract the single continuous float (-1.0 to 1.0)
                 raw_score = _local_model(**inputs).logits.squeeze().item()
 
-            # Translate the continuous score into the dictionary the aggregator expects
-            # (positive - negative) == raw_score, which preserves the signed signal.
             pos_val = raw_score if raw_score > 0 else 0.0
             neg_val = abs(raw_score) if raw_score < 0 else 0.0
             neu_val = max(0.0, 1.0 - abs(raw_score))
@@ -115,10 +131,9 @@ def analyze_headline_sentiment(text: str) -> dict:
             }
         except Exception as e:
             print(f"⚠️ [Local Inference Error] {e}")
-            return {"neutral": 1.0, "positive": 0.0, "negative": 0.0}
+            return {"neutral": 0.5, "positive": 0.25, "negative": 0.25, "score": 0.0}
 
-    return {"neutral": 1.0, "positive": 0.0, "negative": 0.0}
-
+    return {"neutral": 1.0, "positive": 0.0, "negative": 0.0, "score": 0.0}
 
 # ---------------------------------------------------------
 # SYSTEM HEALTH & COLD START WAKE-UP
