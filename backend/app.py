@@ -87,34 +87,52 @@ def analyze_headline_sentiment(text: str) -> dict:
     # 1. Cloud Serverless Route
     if USE_SERVERLESS:
         hf_token = os.getenv("HF_TOKEN", "")
-        api_url = f"https://router.huggingface.co/hf-inference/models/{MODEL_ID}"
-        headers = {"Authorization": f"Bearer {hf_token}", "Content-Type": "application/json"}
+        # Standard HF Inference API — works for any public or private model.
+        # ?wait_for_model=true handles cold-start server-side (avoids manual retry loop).
+        api_url = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
+        headers = {
+            "Authorization": f"Bearer {hf_token}",
+            "Content-Type": "application/json",
+            "x-use-cache": "false",   # always get a fresh prediction
+        }
+        params = {"wait_for_model": "true"}
 
-        def _call_hf_api() -> dict:
-            """Makes the HTTP POST and parses the raw_score from any known HF response shape."""
-            resp = requests.post(api_url, headers=headers, json={"inputs": text}, timeout=20)
+        def _call_hf_api(input_text: str) -> float:
+            """POST to HF Inference API and extract the raw regression score."""
+            resp = requests.post(
+                api_url,
+                headers=headers,
+                params=params,
+                json={"inputs": input_text},
+                timeout=30,
+            )
+            print(f"🔍 [HF Status] {resp.status_code} | body: {resp.text[:300]}")
             resp.raise_for_status()
             data = resp.json()
-            print(f"🔍 [HF Raw Response] {data}")
 
             raw = 0.0
 
-            # Shape 1: [[{"label": "LABEL_0", "score": X}]] — regression via Inference Router
+            # HF text-classification pipeline with num_labels=1 typically returns:
+            # [[{"label": "LABEL_0", "score": <sigmoid(logit)>}]]
+            # The sigmoid maps negative logits → <0.5 and positive logits → >0.5.
+            # We convert back: raw_logit ≈ score*2 - 1  (linear rescale 0–1 → -1 to 1)
             if (
                 isinstance(data, list) and len(data) > 0
                 and isinstance(data[0], list) and len(data[0]) > 0
                 and isinstance(data[0][0], dict)
             ):
-                raw = float(data[0][0].get("score", 0.0))
+                sig = float(data[0][0].get("score", 0.5))
+                raw = sig * 2.0 - 1.0   # un-sigmoid: maps [0,1] → [-1,+1]
 
-            # Shape 2: [{"label": ..., "score": X}]
+            # [{"label": ..., "score": X}] — flat list of dicts
             elif (
                 isinstance(data, list) and len(data) > 0
                 and isinstance(data[0], dict)
             ):
-                raw = float(data[0].get("score", 0.0))
+                sig = float(data[0].get("score", 0.5))
+                raw = sig * 2.0 - 1.0
 
-            # Shape 3: [[-0.353]] — nested list of floats
+            # [[-0.353]] — nested list of raw floats (regression pipeline)
             elif (
                 isinstance(data, list) and len(data) > 0
                 and isinstance(data[0], list) and len(data[0]) > 0
@@ -122,30 +140,22 @@ def analyze_headline_sentiment(text: str) -> dict:
             ):
                 raw = float(data[0][0])
 
-            # Shape 4: [-0.353] — flat list of floats
+            # [-0.353] — flat list of raw floats
             elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], (float, int)):
                 raw = float(data[0])
 
-            # Shape 5: {"score": X} or {"error": "..."}
+            # {"score": X} or {"error": "..."}
             elif isinstance(data, dict):
                 if "error" in data:
-                    raise ValueError(f"HF API error: {data['error']} | estimated_time={data.get('estimated_time')}")
-                raw = float(data.get("score", 0.0))
+                    raise RuntimeError(f"HF API error: {data['error']}")
+                sig = float(data.get("score", 0.5))
+                raw = sig * 2.0 - 1.0
 
-            return raw
+            # Clamp to valid range
+            return max(-1.0, min(1.0, raw))
 
         try:
-            raw_score = _call_hf_api()
-        except ValueError as ve:
-            # Model is still loading — retry once after a brief sleep
-            print(f"⚠️ [HF Loading] {ve}. Retrying in 1.5s...")
-            time.sleep(1.5)
-            try:
-                raw_score = _call_hf_api()
-            except Exception as e2:
-                print(f"⚠️ [Inference Exception]: {repr(e2)}")
-                traceback.print_exc()
-                return {"neutral": 1.0, "positive": 0.0, "negative": 0.0, "score": 0.0}
+            raw_score = _call_hf_api(text)
         except Exception as e:
             print(f"⚠️ [Inference Exception]: {repr(e)}")
             traceback.print_exc()
